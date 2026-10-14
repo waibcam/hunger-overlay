@@ -188,6 +188,10 @@ pub struct LegendQuest {
     pub color: (f32, f32, f32),
     pub objectives: Vec<LegendObjective>,
     pub on_this_map: usize,
+    /// Points de cette carte masqués par le filtre « chance minimum ».
+    pub filtered: usize,
+    /// Masquée localement (clic dans le panneau) : affichée grisée, sans points.
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -214,24 +218,34 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
         Some((px / pm.texture_px, py / pm.texture_px))
     };
     for tq in &tracker.tracked {
-        if tq.completed || hidden.iter().any(|h| h == &tq.quest_id) {
+        if tq.completed {
             continue;
         }
         let Some(pq) = pack.quests.get(&tq.quest_id) else { continue };
         let color = parse_color(&tq.color);
         let qi = legend.len();
+        let is_hidden = hidden.iter().any(|h| h == &tq.quest_id);
         let mut lq = LegendQuest {
             quest_id: tq.quest_id.clone(),
             title: if tq.title.is_empty() { pq.title.clone() } else { tq.title.clone() },
             color,
             objectives: vec![],
             on_this_map: 0,
+            filtered: 0,
+            hidden: is_hidden,
         };
+        if is_hidden {
+            legend.push(lq);
+            continue;
+        }
         for po in &pq.objectives {
             let done = tq.objectives.iter().any(|o| o.objective_key == po.objective_key && o.state == "done");
             let oi = lq.objectives.len();
             let mut here = 0;
             if !done || show_done {
+                let total_here = po.markers.iter().filter(|m| m.map == map_id).count();
+                let kept_here = po.markers.iter().filter(|m| m.map == map_id && m.chance().map(|c| c + 1e-9 >= min_chance).unwrap_or(true)).count();
+                lq.filtered += total_here - kept_here;
                 // Filtre « chance minimum » : seulement pour les points dont la chance est connue (loot).
                 for mk in po.markers.iter().filter(|m| m.map == map_id && m.chance().map(|c| c + 1e-9 >= min_chance).unwrap_or(true)) {
                     if let Some((u, v)) = to_uv(mk) {

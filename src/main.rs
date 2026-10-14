@@ -14,6 +14,7 @@ mod i18n;
 mod log;
 mod model;
 mod net;
+mod panel;
 mod render;
 mod resync;
 mod settings;
@@ -116,6 +117,12 @@ enum MapState {
 struct App {
     main: HWND,
     overlay: HWND,
+    /// Panneau cliquable (légende + réglages rapides).
+    panel: HWND,
+    prenderer: Renderer,
+    panel_hits: Vec<panel::Hit>,
+    panel_hover: Option<usize>,
+    panel_shown: bool,
     cfg: Config,
     s: &'static i18n::Strings,
     shared: SharedRef,
@@ -212,9 +219,73 @@ impl App {
     }
 
     fn apply_capture_affinity(&self) {
+        let a = if self.cfg.capture_visible { WDA_NONE } else { WDA_EXCLUDEFROMCAPTURE };
         unsafe {
-            let _ = SetWindowDisplayAffinity(self.overlay, if self.cfg.capture_visible { WDA_NONE } else { WDA_EXCLUDEFROMCAPTURE });
+            let _ = SetWindowDisplayAffinity(self.overlay, a);
+            let _ = SetWindowDisplayAffinity(self.panel, a);
         }
+    }
+
+    /// Curseur au-dessus du panneau ? (coordonnées écran)
+    fn over_panel(&self, sx: i32, sy: i32) -> bool {
+        match self.legend_rect {
+            Some((l, t, r, b)) => {
+                let (x, y) = ((sx - self.client.0) as f32, (sy - self.client.1) as f32);
+                self.panel_shown && x >= l && x <= r && y >= t && y <= b
+            }
+            None => false,
+        }
+    }
+
+    fn lang_label(&self) -> String {
+        if self.cfg.locale.is_empty() {
+            let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
+            format!("Auto ({})", i18n::effective("", account.as_deref()).to_uppercase())
+        } else {
+            self.cfg.locale.to_uppercase()
+        }
+    }
+
+    fn panel_mouse(&mut self, x: f32, y: f32) {
+        let h = self.panel_hits.iter().position(|h| h.contains(x, y));
+        if h != self.panel_hover {
+            self.panel_hover = h;
+            self.dirty = true;
+        }
+    }
+
+    /// Clic dans le panneau : réglages rapides appliqués et enregistrés immédiatement.
+    fn panel_click(&mut self, x: f32, y: f32) {
+        let Some(hit) = self.panel_hits.iter().find(|h| h.contains(x, y)).cloned() else { return };
+        match hit.action {
+            panel::Action::Settings => {
+                self.open_settings();
+                return;
+            }
+            panel::Action::Collapse => self.cfg.panel_collapsed = !self.cfg.panel_collapsed,
+            panel::Action::ToggleDone => self.cfg.show_done = !self.cfg.show_done,
+            panel::Action::ChanceDown => self.cfg.min_chance = self.cfg.min_chance.saturating_sub(5) / 5 * 5,
+            panel::Action::ChanceUp => self.cfg.min_chance = ((self.cfg.min_chance / 5 + 1) * 5).min(50),
+            panel::Action::Language => {
+                let order: Vec<&str> = std::iter::once("").chain(i18n::LANGS.iter().map(|l| l.0)).collect();
+                let i = order.iter().position(|c| *c == self.cfg.locale).unwrap_or(0);
+                self.cfg.locale = order[(i + 1) % order.len()].to_string();
+                self.configure_net();
+                let _ = self.net.send(Req::Refresh { force: true });
+            }
+            panel::Action::ToggleQuest(id) => {
+                if let Some(p) = self.cfg.hidden_quests.iter().position(|q| *q == id) {
+                    self.cfg.hidden_quests.remove(p);
+                } else {
+                    self.cfg.hidden_quests.push(id);
+                }
+            }
+        }
+        self.cfg.save();
+        if let MapState::Open(m) = &mut self.state {
+            m.data_version = u64::MAX;
+        }
+        self.dirty = true;
     }
 
     // ---------- Entrées ----------
@@ -277,6 +348,11 @@ impl App {
             }
         }
         if self.game_fg().is_none() {
+            return;
+        }
+        // Clic ou molette sur NOTRE panneau : le jeu ne les reçoit pas, la carte ne bouge donc pas.
+        let (sx, sy) = cursor();
+        if self.over_panel(sx, sy) {
             return;
         }
         let (gx, gy, gw, gh) = self.client;
@@ -396,6 +472,9 @@ impl App {
             self.shown = visible;
             unsafe {
                 let _ = ShowWindow(self.overlay, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+            if !visible {
+                self.show_panel(false);
             }
             self.dirty = true;
         }
@@ -580,7 +659,8 @@ impl App {
             drag: None,
             wheel_acc: 0,
             last_input: now,
-            resync_at: None,
+            // Premier recalage dès l'ouverture (corrige une détection du carré à quelques pixels près).
+            resync_at: Some((now + Duration::from_millis(320), false)),
             next_idle_resync: now + Duration::from_millis(1200),
             points: vec![],
             legend: vec![],
@@ -692,6 +772,9 @@ impl App {
             return None;
         }
         let (cx, cy) = cursor();
+        if self.over_panel(cx, cy) {
+            return None;
+        }
         let (lx, ly) = ((cx - self.client.0) as f64, (cy - self.client.1) as f64);
         let lim = self.marker_r() + 6.0;
         let mut best = None;
@@ -709,7 +792,20 @@ impl App {
 
     // ---------- Dessin ----------
 
+    fn show_panel(&mut self, on: bool) {
+        if on != self.panel_shown {
+            self.panel_shown = on;
+            if !on {
+                self.panel_hover = None;
+            }
+            unsafe {
+                let _ = ShowWindow(self.panel, if on { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
+    }
+
     fn draw(&mut self) {
+        let lang_label = self.lang_label();
         let (gx, gy, gw, gh) = self.client;
         let sc = self.sc();
         let _ = self.renderer.set_font_scale(sc);
@@ -754,11 +850,28 @@ impl App {
         }
         // Légende à droite du carré par défaut.
         let right = (m.sq.x0 + m.sq.side) as f32 + 24.0 * sc;
-        let lw = (gw as f32 - right - 16.0 * sc).min(430.0 * sc);
+        let lw = (gw as f32 - right - 16.0 * sc).min(if self.cfg.panel_collapsed { 270.0 } else { 430.0 } * sc);
         let mut legend_rect = None;
         if lw > 180.0 * sc {
-            let hgt = draw_legend(r, self.s, &m.legend, self.last_status.as_ref(), right, 60.0 * sc, lw, gh as f32 - 120.0 * sc, sc, self.cfg.show_done);
-            legend_rect = Some((right, 60.0 * sc, right + lw, 60.0 * sc + hgt));
+            let top = 60.0 * sc;
+            let view = panel::View {
+                s: self.s,
+                legend: &m.legend,
+                status: self.last_status.as_ref(),
+                show_done: self.cfg.show_done,
+                min_chance: self.cfg.min_chance,
+                lang_label,
+                collapsed: self.cfg.panel_collapsed,
+            };
+            let _ = self.prenderer.set_font_scale(sc);
+            let (h, _) = panel::layout(&self.prenderer, &view, lw.floor(), gh as f32 - 120.0 * sc, sc, None, false);
+            let (pw, ph) = (lw.floor() as i32, h.ceil() as i32);
+            if self.prenderer.begin(pw, ph) {
+                let (_, hits) = panel::layout(&self.prenderer, &view, pw as f32, ph as f32, sc, self.panel_hover, true);
+                self.prenderer.present(self.panel, gx + right as i32, gy + top as i32);
+                self.panel_hits = hits;
+            }
+            legend_rect = Some((right, top, right + pw as f32, top + ph as f32));
         }
         if let Some(i) = self.hover {
             if let Some(p) = m.points.get(i) {
@@ -779,6 +892,7 @@ impl App {
         }
         self.renderer.present(self.overlay, gx, gy);
         self.legend_rect = legend_rect;
+        self.show_panel(legend_rect.is_some());
     }
 
     // ---------- Paramètres ----------
@@ -906,68 +1020,6 @@ fn status_text(s: &i18n::Strings, st: Option<&Status>) -> &'static str {
         Some(Status::Offline) => s.st_offline,
         Some(Status::RateLimited) => s.st_rate,
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_legend(r: &Renderer, s: &i18n::Strings, legend: &[LegendQuest], st: Option<&Status>, x: f32, y: f32, w: f32, max_h: f32, sc: f32, show_done: bool) -> f32 {
-    let pad = 14.0 * sc;
-    let iw = w - 2.0 * pad;
-    // Mise en page en deux passes : mesure, puis dessin du fond et du texte.
-    let mut rows: Vec<(Font, String, Rgba, f32, Option<(f32, f32, f32)>)> = vec![];
-    rows.push((Font::Title, s.legend_title.to_string(), (0.93, 0.88, 0.76, 1.0), 0.0, None));
-    let warn = !matches!(st, None | Some(Status::Ok) | Some(Status::Idle));
-    if warn {
-        rows.push((Font::Small, format!("⚠ {}", status_text(s, st)), (1.0, 0.72, 0.45, 1.0), 0.0, None));
-    }
-    if legend.is_empty() {
-        rows.push((Font::Small, s.legend_none.to_string(), (0.85, 0.82, 0.75, 1.0), 0.0, None));
-    }
-    for q in legend {
-        rows.push((Font::Bold, q.title.clone(), (0.97, 0.95, 0.9, 1.0), 18.0 * sc, Some(q.color)));
-        if q.on_this_map == 0 {
-            rows.push((Font::Small, s.legend_elsewhere.to_string(), (0.7, 0.68, 0.62, 1.0), 18.0 * sc, None));
-        }
-        for o in &q.objectives {
-            if o.done && !show_done {
-                continue;
-            }
-            let (mark, c) = if o.done { ("✓", (0.55, 0.55, 0.55, 1.0)) } else if o.markers_here > 0 { ("●", (0.92, 0.9, 0.85, 1.0)) } else { ("○", (0.75, 0.73, 0.68, 1.0)) };
-            rows.push((Font::Text, format!("{mark}  {}", o.label), c, 18.0 * sc, None));
-            if !o.done && o.markers_here == 0 {
-                if let Some(h) = &o.hint {
-                    rows.push((Font::Small, h.clone(), (0.7, 0.68, 0.62, 1.0), 36.0 * sc, None));
-                }
-            }
-        }
-    }
-    let gap = 3.0 * sc;
-    let mut total = pad;
-    let mut heights = vec![];
-    for (f, t, _, indent, _) in &rows {
-        let (_, h) = r.measure(t, *f, iw - indent);
-        heights.push(h);
-        total += h + gap;
-    }
-    total = (total + pad).min(max_h);
-    r.fill_rrect(x, y, x + w, y + total, 8.0 * sc, (0.07, 0.06, 0.05, 0.80));
-    r.stroke_rrect(x, y, x + w, y + total, 8.0 * sc, 1.0 * sc, (0.85, 0.75, 0.55, 0.35));
-    let mut cy = y + pad;
-    for ((f, t, c, indent, dot), h) in rows.iter().zip(heights) {
-        if cy + h > y + total - pad / 2.0 {
-            r.text("…", Font::Text, x + pad, cy, iw, (0.8, 0.8, 0.8, 1.0));
-            break;
-        }
-        if let Some(dc) = dot {
-            r.fill_circle(x + pad + 6.0 * sc, cy + h / 2.0, 6.0 * sc, (dc.0, dc.1, dc.2, 1.0));
-            r.stroke_circle(x + pad + 6.0 * sc, cy + h / 2.0, 6.0 * sc, 1.2 * sc, (1.0, 1.0, 1.0, 0.9), false);
-        }
-        r.text(t, *f, x + pad + indent, cy, iw - indent, *c);
-        cy += h + gap;
-        if matches!(f, Font::Title) {
-            cy += 4.0 * sc;
-        }
-    }
-    total
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1103,6 +1155,42 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let pos = || (((lp.0 & 0xffff) as i16) as f32, (((lp.0 >> 16) & 0xffff) as i16) as f32);
+    match msg {
+        WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE : le jeu garde le focus
+        WM_MOUSEMOVE => {
+            let (x, y) = pos();
+            let mut tme = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut tme);
+            with_app(|a| a.panel_mouse(x, y));
+            LRESULT(0)
+        }
+        0x02A3 => {
+            // WM_MOUSELEAVE
+            with_app(|a| a.panel_mouse(-1.0, -1.0));
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let over = with_app(|a| a.panel_hover.is_some()).unwrap_or(false);
+            let _ = SetCursor(LoadCursorW(None, if over { IDC_HAND } else { IDC_ARROW }).unwrap_or_default());
+            LRESULT(1)
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MOUSEWHEEL => LRESULT(0),
+        WM_LBUTTONUP => {
+            let (x, y) = pos();
+            with_app(|a| a.panel_click(x, y));
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT : les clics passent au jeu
@@ -1137,6 +1225,24 @@ fn main() {
             ..Default::default()
         });
         let main = CreateWindowExW(WINDOW_EX_STYLE(0), main_class, w!("Hunger Overlay"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, inst, None).unwrap();
+        let panel_class = w!("HungerOverlayPanel");
+        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(panel_proc), hInstance: inst.into(), lpszClassName: panel_class, ..Default::default() });
+        // Pas de WS_EX_TRANSPARENT : ce panneau reçoit les clics (sans s'activer).
+        let panel = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            panel_class,
+            w!("Hunger Overlay"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            inst,
+            None,
+        )
+        .unwrap();
         let overlay = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ov_class,
@@ -1171,10 +1277,16 @@ fn main() {
         );
         let cfg = Config::load();
         let renderer = Renderer::new().expect("Direct2D");
+        let prenderer = Renderer::new().expect("Direct2D");
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         let app = App {
             main,
             overlay,
+            panel,
+            prenderer,
+            panel_hits: vec![],
+            panel_hover: None,
+            panel_shown: false,
             cfg,
             s,
             shared,

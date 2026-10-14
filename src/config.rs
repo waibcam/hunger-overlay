@@ -30,6 +30,8 @@ pub struct Config {
     pub min_chance: u32,
     /// Quêtes masquées localement (quest_id).
     pub hidden_quests: Vec<String>,
+    /// Panneau « Quêtes suivies » réduit à sa barre de titre.
+    pub panel_collapsed: bool,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             locale: String::new(),
             min_chance: 0,
             hidden_quests: vec![],
+            panel_collapsed: false,
         }
     }
 }
