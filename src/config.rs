@@ -32,6 +32,9 @@ pub struct Config {
     pub hidden_quests: Vec<String>,
     /// Panneau « Quêtes suivies » réduit à sa barre de titre.
     pub panel_collapsed: bool,
+    /// Le jeu zoome-t-il d'un cran par ÉVÉNEMENT de molette (molettes à défilement fin) plutôt que par
+    /// tranche de 120 ? Appris automatiquement par les recalages (None = pas encore su).
+    pub wheel_per_event: Option<bool>,
 }
 
 impl Default for Config {
@@ -49,6 +52,7 @@ impl Default for Config {
             min_chance: 10,
             hidden_quests: vec![],
             panel_collapsed: false,
+            wheel_per_event: None,
         }
     }
 }

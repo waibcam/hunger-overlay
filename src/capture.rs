@@ -7,6 +7,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 
 /// Image en niveaux de gris (luminance 0..255).
+#[derive(Clone)]
 pub struct Gray {
     pub w: usize,
     pub h: usize,

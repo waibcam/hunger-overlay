@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_CAP_STYLE_ROUND,
-    D2D1_DASH_STYLE_DASH, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_DASH_STYLE_DASH, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -305,19 +305,6 @@ impl Renderer {
         h
     }
 
-    /// Texte avec un léger contour sombre pour rester lisible sur le parchemin.
-    pub fn text_outlined(&self, s: &str, f: Font, x: f32, y: f32, max_w: f32, c: Rgba) -> f32 {
-        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
-            let ws = wide(s);
-            let (_, h) = self.measure(s, f, max_w);
-            self.set((0.0, 0.0, 0.0, 0.85 * c.3));
-            unsafe {
-                let rect = D2D_RECT_F { left: x + dx, top: y + dy, right: x + dx + max_w, bottom: y + dy + h + 2.0 };
-                self.rt.DrawText(&ws, self.font(f), &rect, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
-        }
-        self.text(s, f, x, y, max_w, c)
-    }
 }
 
 impl Drop for Renderer {

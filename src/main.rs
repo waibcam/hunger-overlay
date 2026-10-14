@@ -80,6 +80,13 @@ struct OpenMap {
     last: Instant,
     drag: Option<(i32, i32)>,
     wheel_acc: i32,
+    /// Niveau de zoom selon les deux façons de compter la molette (par 120 / par événement).
+    n_a: i32,
+    n_b: i32,
+    /// Un mouvement (molette, glisser) a eu lieu depuis le dernier recalage.
+    motion: bool,
+    /// Recalage large en cours (retour de focus / des menus) : overlay masqué jusqu'au résultat.
+    wide_pending: bool,
     /// Dernière action souris (molette / glisser) : le recalage périodique attend que la carte soit immobile.
     last_input: Instant,
     /// Recalage visuel programmé ; `true` = recherche large (retour de focus), overlay masqué en attendant.
@@ -107,6 +114,16 @@ impl OpenMap {
 
 /// La détection ne dépend d'AUCUNE touche : la carte est reconnue à l'écran (carré de parchemin en vue par
 /// défaut + panneau d'aide), sa fermeture par la disparition du panneau. La touche carte n'est qu'un accélérateur.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Resync {
+    /// Retour de focus / des menus : large, et recherche complète en dernier recours.
+    Wide,
+    /// Juste après un mouvement : niveaux voisins (±2) et rayon moyen.
+    Motion,
+    /// Contrôle périodique au repos.
+    Idle,
+}
+
 enum MapState {
     Closed { next_probe: Instant, fast_until: Instant },
     Open(Box<OpenMap>),
@@ -144,6 +161,60 @@ struct App {
     legend_rect: Option<(f32, f32, f32, f32)>,
     /// Détection en attente de confirmation (animations d'ouverture : on exige 2 détections identiques).
     candidate: Option<(Square, usize)>,
+    /// Votes (par 120, par événement) des recalages sur la façon dont le jeu compte la molette.
+    wheel_votes: (u32, u32),
+    /// Dernière carte vue (index, carré par défaut, signature du panneau) : permet de la retrouver « de zéro ».
+    remember: Option<(usize, Square, PanelSig)>,
+    next_global: Instant,
+    /// Fil de calcul des recalages.
+    rs_tx: Sender<resync::Job>,
+    rs_out: resync::ResSlot,
+    rs_job: Option<JobInfo>,
+    rs_next_id: u64,
+}
+
+/// Mémorise sur disque la dernière carte vue (pour cette taille d'écran) : carte, carré par défaut, panneau d'aide.
+fn save_remember(client: (i32, i32, i32, i32), idx: usize, sq: &Square, sig: &PanelSig) {
+    let mut v = Vec::new();
+    v.extend_from_slice(b"HOR1");
+    for n in [client.2, client.3, idx as i32] {
+        v.extend_from_slice(&n.to_le_bytes());
+    }
+    for f in [sq.x0, sq.y0, sq.side] {
+        v.extend_from_slice(&f.to_le_bytes());
+    }
+    v.extend_from_slice(&sig.to_bytes());
+    let _ = std::fs::write(config::data_dir().join("map_memory.bin"), v);
+}
+
+fn load_remember(client: (i32, i32, i32, i32)) -> Option<(usize, Square, PanelSig)> {
+    let b = std::fs::read(config::data_dir().join("map_memory.bin")).ok()?;
+    if b.get(0..4)? != b"HOR1" {
+        return None;
+    }
+    let i32_at = |o: usize| Some(i32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?));
+    let f64_at = |o: usize| Some(f64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?));
+    if (i32_at(4)?, i32_at(8)?) != (client.2, client.3) {
+        return None; // autre résolution : la mémoire ne s'applique pas
+    }
+    let idx = i32_at(12)? as usize;
+    let sq = Square { x0: f64_at(16)?, y0: f64_at(24)?, side: f64_at(32)? };
+    let sig = PanelSig::from_bytes(b.get(40..)?)?;
+    (idx < detect::REFS.len()).then_some((idx, sq, sig))
+}
+
+/// Ce qu'on savait au moment de la capture envoyée au fil de calcul.
+struct JobInfo {
+    id: u64,
+    mode: Resync,
+    time: Instant,
+    map_idx: usize,
+    n: i32,
+    n_a: i32,
+    n_b: i32,
+    pred: (f64, f64),
+    /// Recherche complète d'une carte « perdue » (état fermé) : (carte, carré par défaut, panneau).
+    lost: Option<(usize, Square, PanelSig)>,
 }
 
 thread_local! {
@@ -356,21 +427,28 @@ impl App {
             return;
         }
         let (gx, gy, gw, gh) = self.client;
+        let per_event = self.cfg.wheel_per_event == Some(true);
         let MapState::Open(m) = &mut self.state else { return };
         if m.closing_check.is_some() {
             return;
         }
         if flags & WHEEL != 0 {
             m.last_input = Instant::now();
-            m.wheel_acc += data as i16 as i32;
+            m.motion = true;
+            let d = data as i16 as i32;
+            // Modèle A : un cran par tranche de 120 (molette classique).
+            m.wheel_acc += d;
             while m.wheel_acc >= 120 {
                 m.wheel_acc -= 120;
-                m.n = (m.n + 1).min(ZOOM_MAX_N);
+                m.n_a = (m.n_a + 1).min(ZOOM_MAX_N);
             }
             while m.wheel_acc <= -120 {
                 m.wheel_acc += 120;
-                m.n = (m.n - 1).max(0);
+                m.n_a = (m.n_a - 1).max(0);
             }
+            // Modèle B : un cran par événement (molettes à défilement fin).
+            m.n_b = (m.n_b + d.signum()).clamp(0, ZOOM_MAX_N);
+            m.n = if per_event { m.n_b } else { m.n_a };
         }
         if flags & LEFT_DOWN != 0 {
             let (cx, cy) = cursor();
@@ -381,6 +459,7 @@ impl App {
             if inside && !on_panel {
                 m.drag = Some((cx, cy));
                 m.last_input = Instant::now();
+                m.motion = true;
             }
         }
     }
@@ -417,7 +496,10 @@ impl App {
                     match self.probe_confirmed() {
                         Ok(m) => self.opened(m),
                         Err(true) => MapState::Closed { next_probe: now + Duration::from_millis(100), fast_until },
-                        Err(false) => MapState::Closed { next_probe: now + step, fast_until },
+                        Err(false) => match self.relocate_lost(now) {
+                            Some(m) => self.opened(m),
+                            None => MapState::Closed { next_probe: now + step, fast_until },
+                        },
                     }
                 } else {
                     MapState::Closed { next_probe, fast_until }
@@ -460,7 +542,8 @@ impl App {
                 }
             }
         };
-        let visible = game.is_some() && matches!(&self.state, MapState::Open(m) if m.closing_check.is_none() && !m.resync_at.map(|r| r.1).unwrap_or(false));
+        let visible = game.is_some()
+            && matches!(&self.state, MapState::Open(m) if m.closing_check.is_none() && !m.wide_pending && !m.resync_at.map(|r| r.1).unwrap_or(false));
         if visible {
             let hov = self.compute_hover();
             if hov != self.hover {
@@ -587,33 +670,49 @@ impl App {
                 }
             }
             m.panel = PanelSig::from(cur, px0 as i32, py0 as i32);
-            if m.panel.is_none() {
+            let Some(sig) = &m.panel else {
                 logf!("panneau d'aide non reconnu");
                 return false;
-            }
+            };
+            self.remember = Some((m.map_idx, m.sq, sig.clone()));
+            save_remember(self.client, m.map_idx, &m.sq, sig);
             m.next_panel = now + PANEL_EVERY;
         }
         // Recalage visuel : programmé (retour de focus, reprise) ou périodique quand la carte est immobile.
-        let settled = m.drag.is_none() && (m.zoom - tz).abs() < 1e-3 && now.duration_since(m.last_input) > Duration::from_millis(700);
+        // - juste après un mouvement (dès que la carte est immobile et l'animation de zoom presque finie) ;
+        // - périodiquement au repos ; - sur demande (retour de focus / des menus : recherche large).
+        let quiet = m.drag.is_none() && now.duration_since(m.last_input) > Duration::from_millis(220) && (m.zoom - tz).abs() < 0.006 * tz;
+        // 1) Résultat d'un recalage lancé plus tôt ?
+        if let Some((info, res)) = self.take_resync() {
+            if info.lost.is_none() {
+                match self.apply_resync(m, &info, res, now) {
+                    Some(false) => return false, // carte non retrouvée après un retour
+                    Some(true) => self.dirty = true,
+                    None => {}
+                }
+            }
+        }
+        if m.wide_pending && self.rs_job.is_none() {
+            m.wide_pending = false; // demande abandonnée (délai dépassé) : on réaffiche
+        }
+        // 2) Lancer un recalage si nécessaire (un seul à la fois).
         let due = match m.resync_at {
             Some((t, _)) => now >= t && m.drag.is_none(),
-            None => settled && now >= m.next_idle_resync,
+            None => quiet && (m.motion || now >= m.next_idle_resync),
         };
-        if due && m.closing_check.is_none() {
-            let wide = m.resync_at.map(|r| r.1).unwrap_or(false);
+        if due && m.closing_check.is_none() && self.rs_job.is_none() {
+            let mode = if m.resync_at.map(|r| r.1).unwrap_or(false) {
+                Resync::Wide
+            } else if m.motion {
+                Resync::Motion
+            } else {
+                Resync::Idle
+            };
             m.resync_at = None;
-            m.next_idle_resync = now + Duration::from_millis(1200);
-            match Self::resync(self.client, self.legend_rect, m, wide) {
-                Some((applied, score)) => {
-                    self.dirty |= applied || wide;
-                    // Après un retour (focus, menus), si la carte n'est pas retrouvée à l'écran, on ne montre rien.
-                    if wide && score < 0.5 {
-                        logf!("carte non retrouvée à l'écran après reprise");
-                        return false;
-                    }
-                }
-                None if wide => return false,
-                None => {}
+            m.motion = false;
+            m.next_idle_resync = now + Duration::from_millis(1500);
+            if self.start_resync(m, mode, now) && mode == Resync::Wide {
+                m.wide_pending = true;
             }
         }
         if now >= m.next_panel || m.closing_check.map(|t| now >= t).unwrap_or(false) {
@@ -640,8 +739,11 @@ impl App {
         let sq = detect::find_square(&g)?;
         let (idx, score, margin) = detect::identify(&g, &sq)?;
         logf!("identification : {} score {:.3} marge {:.3}", detect::REFS[idx].0, score, margin);
-        let now = Instant::now();
-        Some(OpenMap {
+        Some(Self::new_open(idx, sq, Instant::now()))
+    }
+
+    fn new_open(idx: usize, sq: Square, now: Instant) -> OpenMap {
+        OpenMap {
             map_idx: idx,
             map_id: detect::REFS[idx].0,
             sq,
@@ -658,6 +760,10 @@ impl App {
             last: now,
             drag: None,
             wheel_acc: 0,
+            n_a: 0,
+            n_b: 0,
+            motion: false,
+            wide_pending: false,
             last_input: now,
             // Premier recalage dès l'ouverture (corrige une détection du carré à quelques pixels près).
             resync_at: Some((now + Duration::from_millis(320), false)),
@@ -665,7 +771,83 @@ impl App {
             points: vec![],
             legend: vec![],
             data_version: u64::MAX,
-        })
+        }
+    }
+
+    /// Carte fermée pour nous, mais panneau d'aide visible : la carte est ouverte et déjà zoomée/déplacée
+    /// (appli relancée, état perdu…). On la retrouve par une recherche complète (au plus toutes les 1,5 s).
+    fn relocate_lost(&mut self, now: Instant) -> Option<OpenMap> {
+        // Résultat d'une recherche complète lancée plus tôt ?
+        if let Some((info, res)) = self.take_resync() {
+            let (Some((_, sq, sig)), Some(f)) = (info.lost, res.found) else { return None };
+            let idx = res.map;
+            logf!("recherche complète : {} score {:.3}, n {}, {} ms", detect::REFS[idx].0, f.score, f.n, res.ms);
+            if f.score < 0.6 {
+                return None;
+            }
+            let center = (sq.x0 + sq.side / 2.0, sq.y0 + sq.side / 2.0);
+            let mut m = Self::new_open(idx, sq, now);
+            let side = (1.0 + 0.5 * f.n as f64) * sq.side;
+            m.n = f.n;
+            m.n_a = f.n;
+            m.n_b = f.n;
+            m.zoom = 1.0 + 0.5 * f.n as f64;
+            m.off = (f.x0 + side / 2.0 - center.0, f.y0 + side / 2.0 - center.1);
+            m.panel = Some(sig);
+            m.panel_due = None;
+            m.resync_at = None;
+            return Some(m);
+        }
+        if self.rs_job.is_some() || now < self.next_global {
+            return None;
+        }
+        if self.remember.is_none() {
+            self.remember = load_remember(self.client);
+        }
+        let (idx, sq, sig) = self.remember.clone()?;
+        let (x, y, w, h) = self.client;
+        let (sx, sy, sw, sh) = sig.rect();
+        let present = capture::grab_gray(x + sx, y + sy, sw, sh).map(|g| sig.score(&g) > 0.85).unwrap_or(false);
+        if !present {
+            return None;
+        }
+        // Panneau d'aide visible mais carte non reconnue en vue par défaut : elle est ouverte, zoomée ou déplacée.
+        self.next_global = now + Duration::from_millis(1500);
+        let g = capture::grab_gray(x, y, w, h)?;
+        let center = (sq.x0 + sq.side / 2.0, sq.y0 + sq.side / 2.0);
+        let id = self.rs_next_id;
+        self.rs_next_id += 1;
+        let job = resync::Job { id, g, masks: self.masks(), map: idx, side0: sq.side, center, pred: (sq.x0, sq.y0), n_pred: 0, zooms: vec![], radius: 0.0, kind: resync::Kind::Global };
+        if self.rs_tx.send(job).is_ok() {
+            self.rs_job = Some(JobInfo { id, mode: Resync::Wide, time: now, map_idx: idx, n: 0, n_a: 0, n_b: 0, pred: (sq.x0, sq.y0), lost: Some((idx, sq, sig)) });
+        }
+        None
+    }
+
+    /// Apprend comment le jeu compte la molette, d'après le niveau réellement trouvé par un recalage.
+    fn learn_wheel(&mut self, found: i32, n_a: i32, n_b: i32) {
+        if n_a == n_b {
+            return;
+        }
+        if found == n_b {
+            self.wheel_votes.1 += 1;
+        } else if found == n_a {
+            self.wheel_votes.0 += 1;
+        } else {
+            return;
+        }
+        let want = if self.wheel_votes.1 >= 2 && self.wheel_votes.1 > self.wheel_votes.0 {
+            Some(true)
+        } else if self.wheel_votes.0 >= 2 && self.wheel_votes.0 > self.wheel_votes.1 {
+            Some(false)
+        } else {
+            None
+        };
+        if want.is_some() && want != self.cfg.wheel_per_event {
+            self.cfg.wheel_per_event = want;
+            self.cfg.save();
+            logf!("molette : le jeu compte {}", if want == Some(true) { "un cran par événement" } else { "un cran par tranche de 120" });
+        }
     }
 
     /// Reconstruit les points de la carte ouverte quand les données changent.
@@ -715,51 +897,110 @@ impl App {
     }
 
     /// Recale la position/zoom de la carte sur la capture d'écran. Renvoie Some(true) si une correction a été appliquée.
-    fn resync(client: (i32, i32, i32, i32), legend: Option<(f32, f32, f32, f32)>, m: &mut OpenMap, wide: bool) -> Option<(bool, f64)> {
-        let (x, y, w, h) = client;
-        let g = capture::grab_gray(x, y, w, h)?;
-        let (px0, py0, px1, py1) = detect::panel_rect(h as f64);
-        let masked = |cx: usize, cy: usize| {
-            let (fx, fy) = (cx as f64, cy as f64);
-            if fx >= px0 && fx <= px1 && fy >= py0 && fy <= py1 {
-                return true;
-            }
-            if let Some((l, t, r, b)) = legend {
-                if fx >= l as f64 && fx <= r as f64 && fy >= t as f64 && fy <= b as f64 {
-                    return true;
-                }
-            }
-            false
-        };
-        let s = m.zoom * m.sq.side;
+    /// Zones à ignorer pour le recalage : panneau d'aide du jeu et notre panneau.
+    fn masks(&self) -> Vec<(f64, f64, f64, f64)> {
+        let mut v = vec![detect::panel_rect(self.client.3 as f64)];
+        if let Some((l, t, r, b)) = self.legend_rect {
+            v.push((l as f64, t as f64, r as f64, b as f64));
+        }
+        v
+    }
+
+    /// Capture l'écran et envoie une recherche au fil de calcul.
+    fn start_resync(&mut self, m: &OpenMap, mode: Resync, now: Instant) -> bool {
+        let (x, y, w, h) = self.client;
+        let Some(g) = capture::grab_gray(x, y, w, h) else { return false };
+        let side = (1.0 + 0.5 * m.n as f64) * m.sq.side;
         let (cx, cy) = m.center();
-        let pred = (cx + m.off.0 - s / 2.0, cy + m.off.1 - s / 2.0);
-        let zooms: Vec<i32> = if wide { (m.n - 1..=m.n + 1).filter(|n| (0..=ZOOM_MAX_N).contains(n)).collect() } else { vec![m.n] };
-        let radius = if wide { 640.0 } else { 96.0 };
-        let t0 = Instant::now();
-        let f = resync::locate(&g, m.map_idx, m.sq.side, pred, m.n, &zooms, radius, &masked)?;
-        let s_new = (1.0 + 0.5 * f.n as f64) * m.sq.side;
-        let shift = ((f.x0 + s_new / 2.0 - (pred.0 + s / 2.0)).powi(2) + (f.y0 + s_new / 2.0 - (pred.1 + s / 2.0)).powi(2)).sqrt();
+        let pred = (cx + m.off.0 - side / 2.0, cy + m.off.1 - side / 2.0);
+        let (span, radius, kind) = match mode {
+            Resync::Wide => (2, 640.0, resync::Kind::LocalThenGlobal),
+            Resync::Motion => (2, 400.0, resync::Kind::Local),
+            Resync::Idle => (1, 160.0, resync::Kind::Local),
+        };
+        let mut zooms: Vec<i32> = (m.n - span..=m.n + span).chain([m.n_a, m.n_b]).filter(|n| (0..=ZOOM_MAX_N).contains(n)).collect();
+        zooms.sort();
+        zooms.dedup();
+        let id = self.rs_next_id;
+        self.rs_next_id += 1;
+        let job = resync::Job { id, g, masks: self.masks(), map: m.map_idx, side0: m.sq.side, center: (cx, cy), pred, n_pred: m.n, zooms, radius, kind };
+        if self.rs_tx.send(job).is_err() {
+            return false;
+        }
+        self.rs_job = Some(JobInfo { id, mode, time: now, map_idx: m.map_idx, n: m.n, n_a: m.n_a, n_b: m.n_b, pred, lost: None });
+        true
+    }
+
+    /// Résultat du fil de calcul correspondant à la demande en cours (ou abandon au bout de 5 s).
+    fn take_resync(&mut self) -> Option<(JobInfo, resync::Res)> {
+        let info = self.rs_job.as_ref()?;
+        let mut slot = self.rs_out.lock().unwrap();
+        let ready = slot.as_ref().map(|r| r.id == info.id).unwrap_or(false);
+        if !ready {
+            if info.time.elapsed() > Duration::from_secs(5) {
+                drop(slot);
+                self.rs_job = None;
+            }
+            return None;
+        }
+        let res = slot.take()?;
+        drop(slot);
+        Some((self.rs_job.take()?, res))
+    }
+
+    /// Applique un résultat de recalage. Some(true) = corrigé, Some(false) = carte perdue, None = rien à faire.
+    fn apply_resync(&mut self, m: &mut OpenMap, info: &JobInfo, res: resync::Res, now: Instant) -> Option<bool> {
+        let wide = info.mode == Resync::Wide;
+        if wide {
+            m.wide_pending = false;
+        }
+        if info.map_idx != m.map_idx {
+            return None;
+        }
+        // La carte a bougé depuis la capture : résultat périmé (un nouveau recalage suivra le mouvement).
+        if m.last_input > info.time {
+            if wide {
+                m.resync_at = Some((now, true));
+            }
+            return None;
+        }
+        let Some(f) = res.found else {
+            return if wide { Some(false) } else { None };
+        };
+        let side_p = (1.0 + 0.5 * info.n as f64) * m.sq.side;
+        let side_f = (1.0 + 0.5 * f.n as f64) * m.sq.side;
+        let shift = ((f.x0 + side_f / 2.0 - (info.pred.0 + side_p / 2.0)).powi(2) + (f.y0 + side_f / 2.0 - (info.pred.1 + side_p / 2.0)).powi(2)).sqrt();
         let better = f.score > f.score_pred + 0.02 || f.score_pred < 0.4;
-        let apply = f.score >= 0.6 && (f.n != m.n || shift > 2.0) && better;
+        let apply = f.score >= 0.6 && (f.n != info.n || shift > 2.0) && better;
         logf!(
-            "recalage{} : score {:.3} (prévu {:.3}) n {}→{} écart {:.1} px, {} ms{}",
-            if wide { " large" } else { "" },
+            "recalage {:?}{} : score {:.3} (prévu {:.3}) n {}→{} écart {:.1} px, {} ms{}",
+            info.mode,
+            if res.global_used { " + recherche complète" } else { "" },
             f.score,
             f.score_pred,
-            m.n,
+            info.n,
             f.n,
             shift,
-            t0.elapsed().as_millis(),
+            res.ms,
             if apply { " → CORRIGÉ" } else { "" }
         );
-        if !apply {
-            return Some((false, f.score.max(f.score_pred)));
+        if f.score >= 0.6 {
+            self.learn_wheel(f.n, info.n_a, info.n_b);
         }
-        m.n = f.n;
-        m.zoom = 1.0 + 0.5 * f.n as f64;
-        m.off = (f.x0 + s_new / 2.0 - cx, f.y0 + s_new / 2.0 - cy);
-        Some((true, f.score))
+        if wide && f.score.max(f.score_pred) < 0.5 {
+            logf!("carte non retrouvée à l'écran après reprise");
+            return Some(false);
+        }
+        if apply {
+            let (cx, cy) = m.center();
+            m.n = f.n;
+            m.zoom = 1.0 + 0.5 * f.n as f64;
+            m.off = (f.x0 + side_f / 2.0 - cx, f.y0 + side_f / 2.0 - cy);
+        }
+        m.n_a = m.n;
+        m.n_b = m.n;
+        m.wheel_acc = 0;
+        apply.then_some(true)
     }
 
     fn marker_r(&self) -> f64 {
@@ -1028,7 +1269,7 @@ impl App {
 
 fn status_text(s: &i18n::Strings, st: Option<&Status>) -> &'static str {
     match st {
-        Some(Status::Ok) | None | Some(Status::Idle) => s.st_ok,
+        Some(Status::Ok) | None => s.st_ok,
         Some(Status::NoKey) => s.st_no_key,
         Some(Status::InvalidKey) => s.st_invalid_key,
         Some(Status::Offline) => s.st_offline,
@@ -1290,6 +1531,9 @@ fn main() {
             }),
         );
         let cfg = Config::load();
+        let (rs_tx, rs_out) = resync::spawn_worker(Box::new(move || {
+            let _ = PostMessageW(HWND(main_id as _), WM_NET, WPARAM(0), LPARAM(0));
+        }));
         let renderer = Renderer::new().expect("Direct2D");
         let prenderer = Renderer::new().expect("Direct2D");
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
@@ -1321,6 +1565,13 @@ fn main() {
             was_fg: false,
             legend_rect: None,
             candidate: None,
+            wheel_votes: (0, 0),
+            remember: None,
+            next_global: Instant::now(),
+            rs_tx,
+            rs_out,
+            rs_job: None,
+            rs_next_id: 1,
         };
         app.apply_capture_affinity();
         app.configure_net();

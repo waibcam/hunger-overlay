@@ -14,7 +14,6 @@ pub const MAX_PER_HOUR: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
-    Idle,
     Ok,
     NoKey,
     InvalidKey,
@@ -221,12 +220,11 @@ impl Worker {
         if let Some(e) = &self.etags.tracker {
             req = req.set("If-None-Match", e);
         }
-        let need_pack;
         match req.call() {
             Ok(resp) if resp.status() == 304 => {
                 logf!("tracker : 304");
                 let s = self.shared.lock().unwrap();
-                need_pack = match (&s.pack, &s.tracker) {
+                let need_pack = match (&s.pack, &s.tracker) {
                     (Some(p), Some(t)) => p.pack_version != t.pack_version,
                     _ => true,
                 };
@@ -244,7 +242,7 @@ impl Worker {
                         let _ = std::fs::write(Self::cache("tracker.json"), &body);
                         self.etags.tracker = etag.or_else(|| t.rev.as_ref().map(|r| format!("\"{r}\"")));
                         let mut s = self.shared.lock().unwrap();
-                        need_pack = s.pack.as_ref().map(|p| p.pack_version != t.pack_version).unwrap_or(true);
+                        let need_pack = s.pack.as_ref().map(|p| p.pack_version != t.pack_version).unwrap_or(true);
                         s.tracker = Some(t);
                         s.version += 1;
                         drop(s);
@@ -280,7 +278,6 @@ impl Worker {
                 return;
             }
         }
-        let _ = need_pack;
     }
 
     fn finish(&mut self, need_pack: bool) {

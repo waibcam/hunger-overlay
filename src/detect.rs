@@ -168,6 +168,7 @@ pub fn gray_ncc(a: &Gray, b: &Gray) -> f64 {
 
 /// Signature du panneau d'aide : l'image de sa zone, comparée par corrélation (robuste au survol du
 /// bouton CLOSE, mais distingue le panneau d'autres écrans sombres comme le Compendium).
+#[derive(Clone)]
 pub struct PanelSig {
     x: i32,
     y: i32,
@@ -191,6 +192,23 @@ impl PanelSig {
 
     pub fn score(&self, g: &Gray) -> f64 {
         gray_ncc(&self.img, g)
+    }
+
+    /// Sérialisation simple (pour retrouver la carte au lancement suivant).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(16 + self.img.px.len());
+        for n in [self.x, self.y, self.img.w as i32, self.img.h as i32] {
+            v.extend_from_slice(&n.to_le_bytes());
+        }
+        v.extend_from_slice(&self.img.px);
+        v
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<PanelSig> {
+        let rd = |i: usize| Some(i32::from_le_bytes(b.get(i * 4..i * 4 + 4)?.try_into().ok()?));
+        let (x, y, w, h) = (rd(0)?, rd(1)?, rd(2)? as usize, rd(3)? as usize);
+        let px = b.get(16..16 + w * h)?.to_vec();
+        Some(PanelSig { x, y, img: Gray { w, h, px } })
     }
 }
 
