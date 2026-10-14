@@ -227,7 +227,8 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
         let is_hidden = hidden.iter().any(|h| h == &tq.quest_id);
         let mut lq = LegendQuest {
             quest_id: tq.quest_id.clone(),
-            title: if tq.title.is_empty() { pq.title.clone() } else { tq.title.clone() },
+            // Titre du pack (dans la langue choisie) ; celui du tracker n'est qu'un repli (il est en anglais).
+            title: if pq.title.is_empty() { tq.title.clone() } else { pq.title.clone() },
             color,
             objectives: vec![],
             on_this_map: 0,
