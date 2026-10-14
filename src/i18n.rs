@@ -1,7 +1,9 @@
-//! Textes de l'interface (français ou anglais selon la langue de Windows).
+//! User-interface texts (French or English depending on the Windows language).
 
 use windows::Win32::Globalization::GetUserDefaultUILanguage;
 
+/// Every user-facing UI string, one field per text (prefixes: `st_` = status line, `tip_` = marker tooltip,
+/// `sec_` = settings section, `menu_` = tray menu, `src_` = loot source, `panel_`/`legend_` = in-game panel).
 pub struct Strings {
     pub settings_title: &'static str,
     pub key_label: &'static str,
@@ -82,6 +84,7 @@ pub struct Strings {
     pub updated_to: &'static str,
 }
 
+/// French UI texts.
 pub static FR: Strings = Strings {
     settings_title: "Hunger Overlay — Paramètres",
     key_label: "Clé d'API (à générer sur hunger-companion.com → Compte → Sécurité) :",
@@ -162,6 +165,7 @@ pub static FR: Strings = Strings {
     updated_to: "Hunger Overlay a été mis à jour en version",
 };
 
+/// English UI texts (used for every language other than French).
 pub static EN: Strings = Strings {
     settings_title: "Hunger Overlay — Settings",
     key_label: "API key (generate it on hunger-companion.com → Account → Security):",
@@ -242,7 +246,7 @@ pub static EN: Strings = Strings {
     updated_to: "Hunger Overlay has been updated to version",
 };
 
-/// Langues du site (code, nom affiché).
+/// Languages offered by the site (code, display name).
 pub static LANGS: [(&str, &str); 10] = [
     ("en", "English"),
     ("fr", "Français"),
@@ -256,7 +260,7 @@ pub static LANGS: [(&str, &str); 10] = [
     ("zh", "中文"),
 ];
 
-/// Textes de l'interface : français si la langue effective est le français, anglais sinon.
+/// UI texts: French if the effective language is French, English otherwise.
 pub fn strings_for(lang: &str) -> &'static Strings {
     if lang.starts_with("fr") {
         &FR
@@ -265,13 +269,15 @@ pub fn strings_for(lang: &str) -> &'static Strings {
     }
 }
 
-/// Langue effective : forcée, sinon celle du compte du site, sinon celle de Windows (anglais par défaut).
+/// Effective language: the forced one, otherwise the site account's (if the site supports it), otherwise
+/// Windows' (English by default).
 pub fn effective(forced: &str, account: Option<&str>) -> String {
     if !forced.is_empty() {
         return forced.to_lowercase();
     }
     if let Some(a) = account {
         let a = a.to_lowercase();
+        // Keep only the primary language subtag ("pt-BR" / "pt_br" → "pt").
         let a = a.split(['-', '_']).next().unwrap_or("").to_string();
         if LANGS.iter().any(|(c, _)| *c == a) {
             return a;
@@ -280,15 +286,17 @@ pub fn effective(forced: &str, account: Option<&str>) -> String {
     pack_locale("")
 }
 
+/// UI texts for the Windows language (ignores the forced setting and the site account).
 pub fn t() -> &'static Strings {
     strings_for(&pack_locale(""))
 }
 
-/// Locale du pack : réglage forcé, sinon langue de Windows (code ISO à 2 lettres).
+/// Pack locale: the forced setting, otherwise the Windows UI language (2-letter ISO code).
 pub fn pack_locale(forced: &str) -> String {
     if !forced.is_empty() {
         return forced.to_lowercase();
     }
+    // Low 10 bits of the LANGID = primary language identifier.
     let primary = unsafe { GetUserDefaultUILanguage() } & 0x3ff;
     match primary {
         0x0c => "fr",

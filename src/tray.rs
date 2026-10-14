@@ -1,4 +1,4 @@
-//! Icône dans la zone de notification + menu contextuel.
+//! Notification-area (system tray) icon + its right-click context menu.
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, POINT};
@@ -11,18 +11,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WM_NULL,
 };
 
+// Menu command IDs, delivered to the window as WM_COMMAND.
+/// "Settings…" menu entry.
 pub const ID_SETTINGS: usize = 101;
+/// "Refresh tracker" menu entry.
 pub const ID_REFRESH: usize = 102;
+/// "Install the new version" menu entry (only shown when an update is ready).
 pub const ID_UPDATE: usize = 103;
+/// "Quit" menu entry.
 pub const ID_QUIT: usize = 104;
+/// "Find an item" menu entry.
 pub const ID_SEARCH: usize = 105;
 
+/// Copies `s` as UTF-16 into a fixed-size Win32 buffer, truncating if needed and always NUL-terminating.
 fn copy(dst: &mut [u16], s: &str) {
     let v: Vec<u16> = s.encode_utf16().take(dst.len() - 1).collect();
     dst[..v.len()].copy_from_slice(&v);
     dst[v.len()] = 0;
 }
 
+/// The app's own icon (resource #1 embedded in the exe), falling back to the generic Windows application icon.
 pub fn app_icon() -> HICON {
     unsafe {
         let inst = GetModuleHandleW(None).unwrap_or_default();
@@ -30,10 +38,12 @@ pub fn app_icon() -> HICON {
     }
 }
 
+/// Common NOTIFYICONDATAW for our single tray icon (ID 1, owned by `hwnd`).
 fn base(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, ..Default::default() }
 }
 
+/// Adds the tray icon; mouse events on it are sent to `hwnd` as message `msg`.
 pub fn add(hwnd: HWND, msg: u32, tip: &str) {
     let mut nid = base(hwnd);
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
@@ -45,6 +55,7 @@ pub fn add(hwnd: HWND, msg: u32, tip: &str) {
     }
 }
 
+/// Updates the tooltip shown when hovering the tray icon.
 pub fn set_tip(hwnd: HWND, tip: &str) {
     let mut nid = base(hwnd);
     nid.uFlags = NIF_TIP;
@@ -54,6 +65,7 @@ pub fn set_tip(hwnd: HWND, tip: &str) {
     }
 }
 
+/// Shows a Windows balloon/toast notification from the tray icon.
 pub fn balloon(hwnd: HWND, title: &str, text: &str) {
     let mut nid = base(hwnd);
     nid.uFlags = NIF_INFO;
@@ -65,6 +77,7 @@ pub fn balloon(hwnd: HWND, title: &str, text: &str) {
     }
 }
 
+/// Removes the tray icon (on exit).
 pub fn remove(hwnd: HWND) {
     let nid = base(hwnd);
     unsafe {
@@ -72,7 +85,8 @@ pub fn remove(hwnd: HWND) {
     }
 }
 
-/// Affiche le menu ; les choix arrivent en WM_COMMAND sur `hwnd`.
+/// Shows the menu at the cursor; the chosen entry arrives as WM_COMMAND on `hwnd`.
+/// `update` = also show the "install the new version" entry.
 pub fn menu(hwnd: HWND, s: &crate::i18n::Strings, update: bool) {
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
@@ -90,6 +104,7 @@ pub fn menu(hwnd: HWND, s: &crate::i18n::Strings, update: bool) {
         item(ID_QUIT, s.menu_quit);
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
+        // Standard Win32 tray-menu idiom: foreground window before, WM_NULL after, so the menu closes correctly.
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, None);
         let _ = PostMessageW(hwnd, WM_NULL, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0));

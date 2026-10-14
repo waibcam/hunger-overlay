@@ -1,9 +1,16 @@
-//! Hunger Overlay : affiche les objectifs du quest tracker Hunger Companion par-dessus la carte du jeu.
+//! Hunger Overlay: shows the Hunger Companion quest-tracker objectives on top of the in-game map.
 //!
-//! Principe : aucune lecture ni modification du jeu. L'appli surveille la touche carte, confirme l'ouverture
-//! par quelques pixels de l'écran, identifie la carte, puis dessine les marqueurs dans une fenêtre transparente
-//! non cliquable posée au-dessus du jeu. Le zoom et le déplacement suivent la molette et la souris
-//! (modèle mesuré : docs/overlay/MAP_UI_MEASUREMENTS.md).
+//! Principle: the game is never read from or modified (no memory access, no file access, no injection,
+//! no simulated input). The app watches for the map key, confirms that the map is open by looking at a few
+//! screen pixels (BitBlt screen capture), identifies which map it is, then draws the markers in a transparent,
+//! click-through window placed on top of the game. Zoom and panning follow the mouse wheel and mouse drags,
+//! observed passively through Raw Input (events are never consumed or blocked)
+//! (measured model: docs/overlay/MAP_UI_MEASUREMENTS.md).
+//!
+//! Network: the app only talks to the Hunger Companion website, over HTTPS (see `net.rs` for the exact list of
+//! requests). The only user data sent is the user's API key (in the Authorization header) and, when the user
+//! picks a quest in the search window, that quest's id to (un)track it. No screen captures, input or game data
+//! ever leave the computer.
 
 #![windows_subsystem = "windows"]
 
@@ -46,75 +53,105 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+/// Window message posted by the system-tray icon.
 const WM_TRAY: u32 = WM_APP + 1;
+/// Window message posted by the network thread when new data / a new status is available.
 const WM_NET: u32 = WM_APP + 2;
+/// Main periodic timer (map detection, zoom animation, redraw).
 const TIMER_TICK: usize = 1;
-/// Une fois, 20 s après le démarrage : rendre la mémoire du chargement initial (JSON, décodage…).
+/// Fires once, 20 s after startup: give back the memory used by the initial load (JSON, decoding…).
 const TIMER_TRIM: usize = 2;
+/// Executable name of the game; used only to recognise the game window (process name check, nothing else).
 const GAME_EXE: &str = "projectrlh-win64-shipping.exe";
 
-/// Loi de zoom mesurée : 11 niveaux, facteur 1 + 0,5·n, animation exponentielle (k ≈ 5/s).
+/// Measured zoom law: 11 levels, factor 1 + 0.5·n, exponential animation (k ≈ 5/s).
 const ZOOM_MAX_N: i32 = 10;
+/// Speed of the exponential zoom animation (per second).
 const ZOOM_K: f64 = 5.0;
-/// Sonde visuelle (carte fermée) : 4 fois par seconde, 8 fois juste après la touche carte.
+/// Visual probe (map closed): 4 times per second, 8 times per second right after the map key.
 const PROBE_EVERY: Duration = Duration::from_millis(250);
+/// Faster probe interval used right after the map key was pressed.
 const PROBE_FAST: Duration = Duration::from_millis(120);
+/// How often the help panel is checked while the map is open (to detect that it was closed).
 const PANEL_EVERY: Duration = Duration::from_millis(150);
-/// La signature du panneau d'aide est prise après le fondu d'ouverture (≈ 190 ms).
+/// The help-panel signature is taken after the opening fade-in (≈ 190 ms).
 const PANEL_SIG_DELAY: Duration = Duration::from_millis(260);
-/// Carte « suspendue » (panneau caché par un menu, Échap…) : on la retrouve telle quelle pendant ce délai.
+/// "Suspended" map (panel hidden by a menu, Esc…): it is restored as-is if it reappears within this delay.
 const SUSPEND_MAX: Duration = Duration::from_secs(180);
 
+/// Everything known about the in-game map while it is open: which map, where it is on screen,
+/// the current zoom/pan (predicted from mouse input and corrected from screen pixels) and the markers to draw.
 struct OpenMap {
+    /// Index of the identified map in `refs::NAMES`.
     map_idx: usize,
+    /// Identifier of the identified map (as used by the website data).
     map_id: &'static str,
+    /// On-screen square of the map texture at the default view (zoom 1, no pan).
     sq: Square,
+    /// Target zoom level (0..=ZOOM_MAX_N).
     n: i32,
+    /// Current (animated) zoom factor.
     zoom: f64,
+    /// Current pan offset in client pixels.
     off: (f64, f64),
+    /// Signature of the map's help panel, used to detect when the map is closed.
     panel: Option<PanelSig>,
-    /// Instant où prendre la signature du panneau (après le fondu) ; on attend 2 captures identiques.
+    /// When to take the panel signature (after the fade-in); we wait for 2 identical captures.
     panel_due: Option<Instant>,
+    /// Previous panel capture, compared with the next one to make sure the fade-in is over.
     panel_prev: Option<capture::Gray>,
+    /// Number of attempts made to take the panel signature.
     panel_tries: u32,
+    /// Consecutive panel checks that did not match (map possibly closed).
     panel_miss: u32,
+    /// When to check the panel next.
     next_panel: Instant,
-    /// Vérification de fermeture en cours (touche carte / Échap) : overlay masqué jusqu'au verdict.
+    /// Closing check in progress (map key / Esc): overlay hidden until the verdict.
     closing_check: Option<Instant>,
+    /// Time of the last animation step.
     last: Instant,
+    /// Mouse position at the last drag event, while the map is being dragged.
     drag: Option<(i32, i32)>,
+    /// Accumulated wheel delta not yet converted into whole notches.
     wheel_acc: i32,
-    /// Niveau de zoom selon les deux façons de compter la molette (par 120 / par événement).
+    /// Zoom level according to the two ways of counting the wheel (per 120 units / per event).
     n_a: i32,
     n_b: i32,
-    /// Un mouvement (molette, glisser) a eu lieu depuis le dernier recalage.
+    /// A movement (wheel, drag) happened since the last visual resync.
     motion: bool,
-    /// Recalage large en cours (retour de focus / des menus) : overlay masqué jusqu'au résultat.
+    /// Wide resync in progress (back from focus loss / menus): overlay hidden until the result.
     wide_pending: bool,
-    /// Position incertaine (un recalage a échoué) : on masque les points et on relance une recherche complète.
+    /// Uncertain position (a resync failed): points are hidden and a full search is started.
     uncertain: bool,
-    /// Dernier niveau de zoom confirmé par l'image (le jeu peut ignorer des crans de molette trop rapprochés :
-    /// le vrai niveau est alors entre celui-ci et celui calculé).
+    /// Last zoom level confirmed by the image (the game can ignore wheel notches that are too close together:
+    /// the real level is then between this one and the computed one).
     n_sync: i32,
-    /// Dernière action souris (molette / glisser) : le recalage périodique attend que la carte soit immobile.
+    /// Last mouse action (wheel / drag): the periodic resync waits until the map is still.
     last_input: Instant,
-    /// Recalage visuel programmé ; `true` = recherche large (retour de focus), overlay masqué en attendant.
+    /// Scheduled visual resync; `true` = wide search (back from focus loss), overlay hidden meanwhile.
     resync_at: Option<(Instant, bool)>,
+    /// When the next periodic resync (map at rest) may run.
     next_idle_resync: Instant,
+    /// Markers to draw on this map (from the website's quest-tracker data).
     points: Vec<DrawPoint>,
+    /// Quests shown in the legend panel.
     legend: Vec<LegendQuest>,
+    /// Extra layers shown in the legend panel.
     layers: Vec<model::LegendLayer>,
+    /// Version of the shared data the points were built from (rebuilt when it changes).
     data_version: u64,
 }
 
 impl OpenMap {
+    /// Zoom factor the animation is heading to (1 + 0.5·n).
     fn target_zoom(&self) -> f64 {
         1.0 + 0.5 * self.n as f64
     }
+    /// Centre of the map square in client coordinates.
     fn center(&self) -> (f64, f64) {
         (self.sq.x0 + self.sq.side / 2.0, self.sq.y0 + self.sq.side / 2.0)
     }
-    /// Texture normalisée (u, v) → coordonnées client.
+    /// Normalised texture coordinates (u, v) → client coordinates.
     fn project(&self, u: f64, v: f64) -> (f64, f64) {
         let (cx, cy) = self.center();
         let s = self.zoom * self.sq.side;
@@ -122,82 +159,119 @@ impl OpenMap {
     }
 }
 
-/// La détection ne dépend d'AUCUNE touche : la carte est reconnue à l'écran (carré de parchemin en vue par
-/// défaut + panneau d'aide), sa fermeture par la disparition du panneau. La touche carte n'est qu'un accélérateur.
+/// Kind of visual resync (re-locating the map on screen from captured pixels).
+///
+/// Detection does NOT depend on ANY key: the map is recognised on screen (parchment square in the default
+/// view + help panel), and its closing by the disappearance of the panel. The map key is only an accelerator.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Resync {
-    /// Retour de focus / des menus : large, et recherche complète en dernier recours.
+    /// Back from focus loss / menus: wide search, with a full search as a last resort.
     Wide,
-    /// Juste après un mouvement : niveaux voisins (±2) et rayon moyen.
+    /// Right after a movement: neighbouring levels (±2) and a medium radius.
     Motion,
-    /// Contrôle périodique au repos.
+    /// Periodic check while at rest.
     Idle,
-    /// Recherche complète (tous niveaux, toutes positions) après un recalage raté.
+    /// Full search (all levels, all positions) after a failed resync.
     Global,
 }
 
+/// State of the in-game map as seen by the overlay.
 enum MapState {
+    /// Map not on screen: probe the screen periodically (faster until `fast_until`, e.g. after the map key).
     Closed { next_probe: Instant, fast_until: Instant },
+    /// Map open and identified: markers are drawn.
     Open(Box<OpenMap>),
-    /// Panneau disparu (menu Échap, fermeture…) : on garde l'état pour reprendre si la carte réapparaît.
+    /// Panel gone (Esc menu, closing…): the state is kept so it can resume if the map reappears.
     Suspended { m: Box<OpenMap>, since: Instant, next_probe: Instant },
 }
 
+/// Whole application state (lives on the UI thread, see `APP`).
 struct App {
+    /// Hidden main window: receives tray, timer, Raw Input and network messages.
     main: HWND,
+    /// Transparent, click-through, topmost window where the markers are drawn.
     overlay: HWND,
-    /// Panneau cliquable (légende + réglages rapides).
+    /// Clickable panel (legend + quick settings).
     panel: HWND,
+    /// Renderer of the clickable panel.
     prenderer: Renderer,
+    /// Clickable areas of the panel (buttons, toggles…).
     panel_hits: Vec<panel::Hit>,
+    /// Index of the panel area under the mouse, if any.
     panel_hover: Option<usize>,
+    /// Whether the panel window is currently visible.
     panel_shown: bool,
-    /// Déplacement du panneau en cours : point saisi (coordonnées locales au panneau).
+    /// Panel being moved: grabbed point (coordinates local to the panel).
     panel_grab: Option<(f32, f32)>,
+    /// User settings (saved locally).
     cfg: Config,
+    /// UI strings in the selected language.
     s: &'static i18n::Strings,
+    /// Data shared with the network thread (quest-tracker data downloaded from the website, status).
     shared: SharedRef,
+    /// Channel used to send requests to the network thread.
     net: Sender<Req>,
+    /// Renderer of the overlay window.
     renderer: Renderer,
+    /// Cache of the last foreground-window check: (window handle, is it the game?).
     fg_cache: (isize, bool),
+    /// Game client area in screen coordinates: (x, y, width, height).
     client: (i32, i32, i32, i32),
+    /// Current map state (closed / open / suspended).
     state: MapState,
+    /// Whether the overlay window is currently visible.
     shown: bool,
+    /// The overlay needs to be redrawn.
     dirty: bool,
+    /// Keys currently held down (from Raw Input, observed only), to ignore auto-repeat.
     keys_down: HashSet<u16>,
+    /// Index of the marker under the mouse (tooltip), if any.
     hover: Option<usize>,
+    /// Settings window, when open.
     settings: Option<settings::Settings>,
+    /// The settings window is waiting for the user to press the new map key.
     capture_key: bool,
+    /// "TaskbarCreated" message id (to re-add the tray icon after Explorer restarts).
     taskbar_created: u32,
+    /// Last network status shown to the user (to notify only on changes).
     last_status: Option<Status>,
+    /// The "update available" hint has already been shown.
     update_hint_shown: bool,
+    /// The game was in the foreground at the previous tick.
     was_fg: bool,
+    /// On-screen rectangle of the legend, if drawn.
     legend_rect: Option<(f32, f32, f32, f32)>,
-    /// Détection en attente de confirmation (animations d'ouverture : on exige 2 détections identiques).
+    /// Detection waiting for confirmation (opening animations: 2 identical detections are required).
     candidate: Option<(Square, usize)>,
-    /// Votes (par 120, par événement) des recalages sur la façon dont le jeu compte la molette.
+    /// Votes (per 120, per event) cast by resyncs on how the game counts wheel notches.
     wheel_votes: (u32, u32),
-    /// Dernière carte vue (index, carré par défaut, signature du panneau) : permet de la retrouver « de zéro ».
+    /// Last map seen (index, default square, panel signature): lets it be found again "from scratch".
     remember: Option<(usize, Square, PanelSig)>,
+    /// Earliest time for the next full search of a "lost" map while closed.
     next_global: Instant,
-    /// Fil de calcul des recalages.
+    /// Resync worker thread (image matching runs off the UI thread).
     rs_tx: Sender<resync::Job>,
+    /// Slot where the worker thread puts its result.
     rs_out: resync::ResSlot,
+    /// The job currently running on the worker thread, if any.
     rs_job: Option<JobInfo>,
+    /// Id given to the next resync job.
     rs_next_id: u64,
-    /// Installation demandée depuis le menu (en mode « me prévenir »).
+    /// Install requested from the menu (in "notify me" mode).
     install_requested: bool,
+    /// When to check for an app update next.
     next_update_check: Instant,
-    /// Page à ouvrir si l'utilisateur clique sur la dernière notification.
+    /// Page to open if the user clicks the last notification.
     balloon_url: Option<String>,
-    /// Fenêtre « Chercher un objet ».
+    /// "Search for an item" window.
     search: Option<search::Search>,
-    /// Objets / index déjà demandés au réseau (pour ne pas redemander en boucle).
+    /// Items / index already requested from the network (so they are not requested again in a loop).
     items_requested: HashSet<String>,
     index_requested: bool,
 }
 
-/// Mémorise sur disque la dernière carte vue (pour cette taille d'écran) : carte, carré par défaut, panneau d'aide.
+/// Saves the last map seen (for this screen size) to disk: map, default square, help panel.
+/// This is a small local file in the app's own data folder (`map_memory.bin`); nothing is sent anywhere.
 fn save_remember(client: (i32, i32, i32, i32), idx: usize, sq: &Square, sig: &PanelSig) {
     let mut v = Vec::new();
     v.extend_from_slice(b"HOR1");
@@ -211,6 +285,7 @@ fn save_remember(client: (i32, i32, i32, i32), idx: usize, sq: &Square, sig: &Pa
     let _ = std::fs::write(config::data_dir().join("map_memory.bin"), v);
 }
 
+/// Loads the last map seen from `map_memory.bin`, if it was saved for the same client size.
 fn load_remember(client: (i32, i32, i32, i32)) -> Option<(usize, Square, PanelSig)> {
     let b = std::fs::read(config::data_dir().join("map_memory.bin")).ok()?;
     if b.get(0..4)? != b"HOR1" {
@@ -219,7 +294,7 @@ fn load_remember(client: (i32, i32, i32, i32)) -> Option<(usize, Square, PanelSi
     let i32_at = |o: usize| Some(i32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?));
     let f64_at = |o: usize| Some(f64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?));
     if (i32_at(4)?, i32_at(8)?) != (client.2, client.3) {
-        return None; // autre résolution : la mémoire ne s'applique pas
+        return None; // different resolution: the saved memory does not apply
     }
     let idx = i32_at(12)? as usize;
     let sq = Square { x0: f64_at(16)?, y0: f64_at(24)?, side: f64_at(32)? };
@@ -227,32 +302,43 @@ fn load_remember(client: (i32, i32, i32, i32)) -> Option<(usize, Square, PanelSi
     (idx < crate::refs::NAMES.len()).then_some((idx, sq, sig))
 }
 
-/// Ce qu'on savait au moment de la capture envoyée au fil de calcul.
+/// What was known at the moment the capture was sent to the worker thread.
 struct JobInfo {
+    /// Job id (to match the result with the request).
     id: u64,
+    /// Kind of resync requested.
     mode: Resync,
+    /// When the screen was captured.
     time: Instant,
+    /// Map being tracked.
     map_idx: usize,
+    /// Zoom levels at capture time (main estimate and the two wheel-counting variants).
     n: i32,
     n_a: i32,
     n_b: i32,
+    /// Predicted pan offset at capture time.
     pred: (f64, f64),
-    /// Recherche complète d'une carte « perdue » (état fermé) : (carte, carré par défaut, panneau).
+    /// Full search for a "lost" map (closed state): (map, default square, panel).
     lost: Option<(usize, Square, PanelSig)>,
 }
 
 thread_local! {
+    /// The single application state, owned by the UI thread.
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
+/// Runs `f` on the application state, if it exists and is not already borrowed (re-entrant window messages).
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
 
+/// Converts a Rust string to a null-terminated UTF-16 string for Win32 APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+/// Is this window the game? Only compares the owning process's executable name with `GAME_EXE`
+/// (limited "query information" access: the game process is never read or modified).
 fn is_game_window(hwnd: HWND) -> bool {
     unsafe {
         let mut pid = 0u32;
@@ -269,6 +355,7 @@ fn is_game_window(hwnd: HWND) -> bool {
     }
 }
 
+/// Client area of a window in screen coordinates: (x, y, width, height).
 fn client_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     unsafe {
         let mut r = RECT::default();
@@ -279,14 +366,14 @@ fn client_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// Rend à Windows les pages mémoire inutilisées (le « working set » retombe au strict nécessaire).
+/// Gives unused memory pages back to Windows (the "working set" drops to the bare minimum).
 fn trim_memory() {
     unsafe {
         let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(windows::Win32::System::Threading::GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
 
-/// Une fenêtre de l'appli (recherche, paramètres) est-elle au premier plan ?
+/// Is one of the app's own windows (search, settings) in the foreground?
 fn ours_fg() -> bool {
     unsafe {
         let mut pid = 0u32;
@@ -295,6 +382,7 @@ fn ours_fg() -> bool {
     }
 }
 
+/// Current mouse-cursor position in screen coordinates.
 fn cursor() -> (i32, i32) {
     let mut p = POINT::default();
     unsafe {
@@ -304,7 +392,7 @@ fn cursor() -> (i32, i32) {
 }
 
 impl App {
-    /// Fenêtre du jeu si elle est au premier plan.
+    /// The game window, if it is in the foreground (result cached per foreground window).
     fn game_fg(&mut self) -> Option<HWND> {
         let fg = unsafe { GetForegroundWindow() };
         if fg.0 as isize != self.fg_cache.0 {
@@ -317,10 +405,13 @@ impl App {
         }
     }
 
+    /// UI scale factor relative to a 1440-pixel-high game window (minimum 0.5).
     fn sc(&self) -> f32 {
         (self.client.3 as f32 / 1440.0).max(0.5)
     }
 
+    /// Sends the current settings to the network thread: API key, website base URL and language.
+    /// The API key is only ever sent to that website, over HTTPS (Authorization header).
     fn configure_net(&self) {
         let _ = self.net.send(Req::Configure {
             key: self.cfg.api_key(),
@@ -329,6 +420,8 @@ impl App {
         });
     }
 
+    /// Shows or hides the overlay and panel in screenshots / recordings / streams, per the user's setting
+    /// (`SetWindowDisplayAffinity`).
     fn apply_capture_affinity(&self) {
         let a = if self.cfg.capture_visible { WDA_NONE } else { WDA_EXCLUDEFROMCAPTURE };
         unsafe {
@@ -337,7 +430,7 @@ impl App {
         }
     }
 
-    /// Curseur au-dessus du panneau ? (coordonnées écran)
+    /// Is the cursor over the panel? (screen coordinates)
     fn over_panel(&self, sx: i32, sy: i32) -> bool {
         match self.legend_rect {
             Some((l, t, r, b)) => {
@@ -348,6 +441,7 @@ impl App {
         }
     }
 
+    /// Label of the current language for the panel ("Auto (XX)" when it follows the account / system).
     fn lang_label(&self) -> String {
         if self.cfg.locale.is_empty() {
             let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
@@ -357,7 +451,7 @@ impl App {
         }
     }
 
-    /// Bouton enfoncé sur le panneau : début de déplacement si c'est la poignée.
+    /// Mouse button pressed on the panel: starts moving it if it is the grip.
     fn panel_down(&mut self, x: f32, y: f32) -> bool {
         let on_grip = self.panel_hits.iter().any(|h| h.contains(x, y) && h.action == panel::Action::Move);
         if on_grip {
@@ -366,7 +460,7 @@ impl App {
         on_grip
     }
 
-    /// Déplacement du panneau (curseur en coordonnées écran).
+    /// Moves the panel (cursor in screen coordinates); the position is stored relative to the game window.
     fn panel_drag_to(&mut self, sx: i32, sy: i32) {
         let Some((gx, gy)) = self.panel_grab else { return };
         let (cx, cy, cw, ch) = self.client;
@@ -379,6 +473,7 @@ impl App {
         self.dirty = true;
     }
 
+    /// Mouse button released: ends a panel move and saves the new position.
     fn panel_up(&mut self) -> bool {
         if self.panel_grab.take().is_some() {
             self.cfg.save();
@@ -387,6 +482,7 @@ impl App {
         false
     }
 
+    /// Mouse moved over the panel: updates the hovered area.
     fn panel_mouse(&mut self, x: f32, y: f32) {
         let h = self.panel_hits.iter().position(|h| h.contains(x, y));
         if h != self.panel_hover {
@@ -395,7 +491,7 @@ impl App {
         }
     }
 
-    /// Clic dans le panneau : réglages rapides appliqués et enregistrés immédiatement.
+    /// Click in the panel: quick settings are applied and saved immediately.
     fn panel_click(&mut self, x: f32, y: f32) {
         let Some(hit) = self.panel_hits.iter().find(|h| h.contains(x, y)).cloned() else { return };
         match hit.action {
@@ -444,16 +540,21 @@ impl App {
         self.dirty = true;
     }
 
-    // ---------- Entrées ----------
+    // ---------- Input ----------
+    // Keyboard and mouse events arrive through Raw Input registered in passive mode (RIDEV_INPUTSINK):
+    // the overlay only OBSERVES them; they are never consumed, blocked, modified or re-sent to the game.
 
+    /// Keyboard event (observed only). Used to capture a new map key in the settings window, and to
+    /// react faster when the map key / Esc is pressed while the game is in the foreground.
     fn on_key(&mut self, vk: u16, down: bool) {
         if !down {
             self.keys_down.remove(&vk);
             return;
         }
         if !self.keys_down.insert(vk) {
-            return; // répétition automatique
+            return; // auto-repeat
         }
+        // Settings window is waiting for the new map key (Esc cancels).
         if self.capture_key {
             if vk != 0x1B {
                 self.cfg.map_vk = vk as u32;
@@ -474,13 +575,13 @@ impl App {
         let now = Instant::now();
         if vk as u32 == self.cfg.map_vk || vk == 0x1B {
             match &mut self.state {
-                // Accélérateur : on sonde l'écran plus souvent pendant un instant.
+                // Accelerator: probe the screen more often for a short while.
                 MapState::Closed { next_probe, fast_until } => {
                     *next_probe = now + Duration::from_millis(200);
                     *fast_until = now + Duration::from_millis(1200);
                 }
                 MapState::Suspended { next_probe, .. } => *next_probe = now + Duration::from_millis(200),
-                // Fermeture probable : on masque tout de suite et on vérifie à l'écran.
+                // Probably closing: hide right away and verify on screen.
                 MapState::Open(m) => {
                     m.closing_check = Some(now + Duration::from_millis(250));
                     m.drag = None;
@@ -490,13 +591,14 @@ impl App {
         }
     }
 
-    /// Événement souris brut. `pos` = position du curseur AU MOMENT de l'événement (GetMessagePos), et non
-    /// au moment du traitement : un glisser très rapide n'est ainsi jamais perdu.
+    /// Raw mouse event (observed only, never consumed). `pos` = cursor position AT THE TIME of the event
+    /// (GetMessagePos), not at processing time: a very fast drag is therefore never lost.
+    /// Used to predict the in-game map's zoom (wheel) and pan (left-button drag).
     fn on_mouse(&mut self, flags: u16, data: u16, pos: (i32, i32)) {
         const LEFT_DOWN: u16 = 0x0001;
         const LEFT_UP: u16 = 0x0002;
         const WHEEL: u16 = 0x0400;
-        // Glisser en cours : on suit chaque déplacement jusqu'au relâchement inclus.
+        // Drag in progress: follow every movement up to and including the release.
         if let MapState::Open(m) = &mut self.state {
             if let Some((lx, ly)) = m.drag {
                 if pos != (lx, ly) {
@@ -508,7 +610,7 @@ impl App {
                     self.dirty = true;
                 }
             }
-            // Le relâchement termine TOUJOURS un glisser, même si le jeu a perdu le focus entre-temps.
+            // The release ALWAYS ends a drag, even if the game lost focus in the meantime.
             if flags & LEFT_UP != 0 && m.drag.take().is_some() {
                 m.last_input = Instant::now();
             }
@@ -516,14 +618,14 @@ impl App {
         if flags == 0 || self.game_fg().is_none() {
             return;
         }
-        // Clic ou molette sur NOTRE panneau : le jeu ne les reçoit pas, la carte ne bouge donc pas.
+        // Click or wheel on OUR panel: the game does not receive them, so the map does not move.
         let (sx, sy) = pos;
         if self.over_panel(sx, sy) {
             return;
         }
         let (gx, gy, gw, gh) = self.client;
-        // Mesuré en jeu (2026-10-14) : un cran de zoom par ÉVÉNEMENT de molette, quelle que soit sa taille.
-        // Le modèle « par 120 » ne reste utilisé que si les recalages l'ont explicitement appris.
+        // Measured in game (2026-10-14): one zoom notch per wheel EVENT, whatever its size.
+        // The "per 120" model is only used if resyncs have explicitly learned it.
         let per_event = self.cfg.wheel_per_event != Some(false);
         let MapState::Open(m) = &mut self.state else { return };
         if m.closing_check.is_some() {
@@ -533,7 +635,7 @@ impl App {
             m.last_input = Instant::now();
             m.motion = true;
             let d = data as i16 as i32;
-            // Modèle A : un cran par tranche de 120 (molette classique).
+            // Model A: one notch per 120 units (classic wheel).
             m.wheel_acc += d;
             while m.wheel_acc >= 120 {
                 m.wheel_acc -= 120;
@@ -543,10 +645,11 @@ impl App {
                 m.wheel_acc += 120;
                 m.n_a = (m.n_a - 1).max(0);
             }
-            // Modèle B : un cran par événement (molettes à défilement fin).
+            // Model B: one notch per event (smooth-scrolling wheels).
             m.n_b = (m.n_b + d.signum()).clamp(0, ZOOM_MAX_N);
             m.n = if per_event { m.n_b } else { m.n_a };
         }
+        // Left button pressed on the map (not on the game's help panel): a drag (pan) starts.
         if flags & LEFT_DOWN != 0 {
             let (cx, cy) = pos;
             let (lx, ly) = ((cx - gx) as f64, (cy - gy) as f64);
@@ -561,8 +664,10 @@ impl App {
         }
     }
 
-    // ---------- Boucle (≈ 64 Hz) ----------
+    // ---------- Loop (≈ 64 Hz) ----------
 
+    /// Main periodic step: tracks the game window, detects the map opening/closing from screen pixels,
+    /// updates zoom/pan, shows/hides the overlay and redraws it when needed.
     fn tick(&mut self) {
         let now = Instant::now();
         let game = self.game_fg();
@@ -572,10 +677,11 @@ impl App {
             if game.is_none() {
                 m.drag = None;
             } else if regained {
-                // Retour dans le jeu : la carte a pu bouger sans nous (clic de reprise de focus…) → recalage large.
+                // Back in the game: the map may have moved without us (focus-regain click…) → wide resync.
                 m.resync_at = Some((now + Duration::from_millis(350), true));
             }
         }
+        // Follow the game window's position and size.
         if let Some(g) = game {
             if let Some(rc) = client_rect(g) {
                 if rc != self.client {
@@ -586,6 +692,7 @@ impl App {
         }
         self.sync_data();
         self.maybe_install_update(now);
+        // Advance the map state machine (closed → open → suspended → …).
         let state = std::mem::replace(&mut self.state, MapState::Closed { next_probe: now, fast_until: now });
         self.state = match state {
             MapState::Closed { next_probe, fast_until } => {
@@ -605,17 +712,17 @@ impl App {
             }
             MapState::Suspended { mut m, since, next_probe } => {
                 if now.duration_since(since) > SUSPEND_MAX {
-                    logf!("carte considérée fermée");
+                    logf!("map considered closed");
                     MapState::Closed { next_probe: now, fast_until: now }
                 } else if game.is_some() && now >= next_probe {
                     let fresh = self.probe_confirmed();
                     if let Ok(fresh) = fresh {
-                        // Nouvelle ouverture (vue par défaut).
+                        // New opening (default view).
                         self.opened(fresh)
                     } else if matches!(fresh, Err(true)) {
                         MapState::Suspended { m, since, next_probe: now + Duration::from_millis(100) }
                     } else if self.panel_present(&m) {
-                        logf!("carte retrouvée (reprise de l'état, recalage)");
+                        logf!("map found again (state restored, resync)");
                         m.panel_miss = 0;
                         m.closing_check = None;
                         m.drag = None;
@@ -634,12 +741,13 @@ impl App {
                 if self.tick_open(&mut m, game.is_some(), now) {
                     MapState::Open(m)
                 } else {
-                    logf!("panneau de carte disparu : overlay masqué");
+                    logf!("map panel gone: overlay hidden");
                     self.dirty = true;
                     MapState::Suspended { m, since: now, next_probe: now + PROBE_EVERY }
                 }
             }
         };
+        // The overlay is visible only while the game (or one of our windows) is in front and the map is open and located.
         let visible = (game.is_some() || ours_fg())
             && matches!(&self.state, MapState::Open(m) if m.closing_check.is_none() && !m.wide_pending && !m.resync_at.map(|r| r.1).unwrap_or(false));
         if visible {
@@ -656,7 +764,7 @@ impl App {
             }
             if !visible {
                 self.show_panel(false);
-                // Carte masquée : on rend la mémoire des images de rendu (2560×1440 ≈ 15 Mo) à Windows.
+                // Map hidden: give the render images' memory (2560×1440 ≈ 15 MB) back to Windows.
                 self.renderer.release();
                 self.prenderer.release();
                 trim_memory();
@@ -669,7 +777,7 @@ impl App {
         }
     }
 
-    /// Sonde légère (2 lignes de pixels) puis, si elle passe, détection complète et identification.
+    /// Light probe (2 lines of screen pixels) then, if it passes, full detection and identification.
     fn probe_and_detect(&self) -> Option<OpenMap> {
         let (x, y, w, h) = self.client;
         if !detect::probe(x, y, w, h) {
@@ -678,7 +786,7 @@ impl App {
         self.detect_open()
     }
 
-    /// Ok = carte confirmée ; Err(true) = 1re détection, à confirmer au prochain passage ; Err(false) = rien.
+    /// Ok = map confirmed; Err(true) = 1st detection, to be confirmed on the next pass; Err(false) = nothing.
     fn probe_confirmed(&mut self) -> Result<OpenMap, bool> {
         let Some(m) = self.probe_and_detect() else {
             self.candidate = None;
@@ -696,13 +804,15 @@ impl App {
         }
     }
 
+    /// A map was just detected as open: asks the network thread for fresh tracker data and switches to `Open`.
     fn opened(&mut self, m: OpenMap) -> MapState {
-        logf!("carte ouverte : {} (carré {:.0},{:.0} côté {:.1})", m.map_id, m.sq.x0, m.sq.y0, m.sq.side);
+        logf!("map opened: {} (square {:.0},{:.0} side {:.1})", m.map_id, m.sq.x0, m.sq.y0, m.sq.side);
         let _ = self.net.send(Req::Refresh { force: false });
         self.dirty = true;
         MapState::Open(Box::new(m))
     }
 
+    /// Is the map's help panel still on screen? (captures that small screen area and compares it with the signature)
     fn panel_present(&self, m: &OpenMap) -> bool {
         match &m.panel {
             Some(sig) => {
@@ -713,8 +823,9 @@ impl App {
         }
     }
 
-    /// Une image de la carte ouverte. Renvoie false si le panneau d'aide a disparu (carte cachée ou fermée).
+    /// One frame of the open map. Returns false if the help panel disappeared (map hidden or closed).
     fn tick_open(&mut self, m: &mut OpenMap, fg: bool, now: Instant) -> bool {
+        // Animate the zoom towards its target, like the game does.
         let dt = now.duration_since(m.last).as_secs_f64().min(0.1);
         m.last = now;
         let tz = m.target_zoom();
@@ -725,18 +836,19 @@ impl App {
             }
             self.dirty = true;
         }
+        // End a drag if the left button is no longer held (state read only) or the game lost focus.
         let lmb_down = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) } < 0;
         if m.drag.is_some() && (!lmb_down || !fg) {
             m.drag = None;
             m.last_input = now;
         }
         if m.drag.is_some() {
-            m.last_input = now; // le déplacement lui-même est suivi événement par événement (on_mouse)
+            m.last_input = now; // the movement itself is followed event by event (on_mouse)
         }
         if !fg {
             return true;
         }
-        // Signature du panneau d'aide, une fois le fondu terminé ; on affine aussi le carré si la vue n'a pas bougé.
+        // Help-panel signature, once the fade-in is over; the square is also refined if the view has not moved.
         if let Some(t) = m.panel_due {
             if now < t {
                 return true;
@@ -746,7 +858,7 @@ impl App {
             let Some(cur) = capture::grab_gray(x + px0 as i32, y + py0 as i32, (px1 - px0) as i32, (py1 - py0) as i32) else {
                 return true;
             };
-            // Écran stable (fondu terminé) quand deux captures successives sont identiques.
+            // Screen stable (fade-in over) when two successive captures are identical.
             let stable = m.panel_prev.as_ref().map(|p| detect::gray_ncc(p, &cur) > 0.97).unwrap_or(false);
             m.panel_tries += 1;
             if !stable && m.panel_tries < 10 {
@@ -765,36 +877,37 @@ impl App {
             }
             m.panel = PanelSig::from(cur, px0 as i32, py0 as i32);
             let Some(sig) = &m.panel else {
-                logf!("panneau d'aide non reconnu");
+                logf!("help panel not recognised");
                 return false;
             };
             self.remember = Some((m.map_idx, m.sq, sig.clone()));
             save_remember(self.client, m.map_idx, &m.sq, sig);
             m.next_panel = now + PANEL_EVERY;
         }
-        // Recalage visuel : programmé (retour de focus, reprise) ou périodique quand la carte est immobile.
-        // - juste après un mouvement (dès que la carte est immobile et l'animation de zoom presque finie) ;
-        // - périodiquement au repos ; - sur demande (retour de focus / des menus : recherche large).
+        // Visual resync: scheduled (focus regained, resume) or periodic while the map is still.
+        // - right after a movement (as soon as the map is still and the zoom animation almost finished);
+        // - periodically at rest; - on request (focus regained / back from menus: wide search).
         let quiet = m.drag.is_none() && now.duration_since(m.last_input) > Duration::from_millis(220) && (m.zoom - tz).abs() < 0.006 * tz;
-        // 1) Résultat d'un recalage lancé plus tôt ?
+        // 1) Result of a resync started earlier?
         if let Some((info, res)) = self.take_resync() {
             if info.lost.is_none() {
                 match self.apply_resync(m, &info, res, now) {
-                    Some(false) => return false, // carte non retrouvée après un retour
+                    Some(false) => return false, // map not found again after coming back
                     Some(true) => self.dirty = true,
                     None => {}
                 }
             }
         }
         if m.wide_pending && self.rs_job.is_none() {
-            m.wide_pending = false; // demande abandonnée (délai dépassé) : on réaffiche
+            m.wide_pending = false; // request dropped (timed out): show again
         }
-        // 2) Lancer un recalage si nécessaire (un seul à la fois).
+        // 2) Start a resync if needed (only one at a time).
         let due = match m.resync_at {
             Some((t, _)) => now >= t && m.drag.is_none(),
             None => quiet && (m.motion || now >= m.next_idle_resync),
         };
         if due && m.closing_check.is_none() && self.rs_job.is_none() {
+            // Choose the kind of search from what triggered it.
             let mode = if m.resync_at.map(|r| r.1).unwrap_or(false) {
                 Resync::Wide
             } else if m.motion {
@@ -811,6 +924,7 @@ impl App {
                 m.wide_pending = true;
             }
         }
+        // 3) Is the help panel still there? Two misses in a row (or one during a closing check) = map gone.
         if now >= m.next_panel || m.closing_check.map(|t| now >= t).unwrap_or(false) {
             m.next_panel = now + PANEL_EVERY;
             if self.panel_present(m) {
@@ -829,15 +943,18 @@ impl App {
         true
     }
 
+    /// Full detection: captures the game's client area (grayscale screen pixels), finds the map square
+    /// and identifies which map it is by comparing it with the bundled reference images.
     fn detect_open(&self) -> Option<OpenMap> {
         let (x, y, w, h) = self.client;
         let g = capture::grab_gray(x, y, w, h)?;
         let sq = detect::find_square(&g)?;
         let (idx, score, margin) = detect::identify(&g, &sq)?;
-        logf!("identification : {} score {:.3} marge {:.3}", crate::refs::NAMES[idx], score, margin);
+        logf!("identification: {} score {:.3} margin {:.3}", crate::refs::NAMES[idx], score, margin);
         Some(Self::new_open(idx, sq, Instant::now()))
     }
 
+    /// Fresh state for a map just opened in its default view (zoom 1, no pan).
     fn new_open(idx: usize, sq: Square, now: Instant) -> OpenMap {
         OpenMap {
             map_idx: idx,
@@ -863,7 +980,7 @@ impl App {
             uncertain: false,
             n_sync: 0,
             last_input: now,
-            // Premier recalage dès l'ouverture (corrige une détection du carré à quelques pixels près).
+            // First resync right after opening (corrects a square detection that is off by a few pixels).
             resync_at: Some((now + Duration::from_millis(320), false)),
             next_idle_resync: now + Duration::from_millis(1200),
             points: vec![],
@@ -873,17 +990,18 @@ impl App {
         }
     }
 
-    /// Carte fermée pour nous, mais panneau d'aide visible : la carte est ouverte et déjà zoomée/déplacée
-    /// (appli relancée, état perdu…). On la retrouve par une recherche complète (au plus toutes les 1,5 s).
+    /// Map closed as far as we know, but help panel visible: the map is open and already zoomed/moved
+    /// (app restarted, state lost…). It is found again by a full search (at most every 1.5 s).
     fn relocate_lost(&mut self, now: Instant) -> Option<OpenMap> {
-        // Résultat d'une recherche complète lancée plus tôt ?
+        // Result of a full search started earlier?
         if let Some((info, res)) = self.take_resync() {
             let (Some((_, sq, sig)), Some(f)) = (info.lost, res.found) else { return None };
             let idx = res.map;
-            logf!("recherche complète : {} score {:.3}, n {}, {} ms", crate::refs::NAMES[idx], f.score, f.n, res.ms);
+            logf!("full search: {} score {:.3}, n {}, {} ms", crate::refs::NAMES[idx], f.score, f.n, res.ms);
             if f.score < 0.6 {
                 return None;
             }
+            // Rebuild the open-map state from the zoom level and position that were found.
             let center = (sq.x0 + sq.side / 2.0, sq.y0 + sq.side / 2.0);
             let mut m = Self::new_open(idx, sq, now);
             let side = (1.0 + 0.5 * f.n as f64) * sq.side;
@@ -900,6 +1018,7 @@ impl App {
         if self.rs_job.is_some() || now < self.next_global {
             return None;
         }
+        // Only possible if we know which map was last seen (and where its help panel is).
         if self.remember.is_none() {
             self.remember = load_remember(self.client);
         }
@@ -910,7 +1029,8 @@ impl App {
         if !present {
             return None;
         }
-        // Panneau d'aide visible mais carte non reconnue en vue par défaut : elle est ouverte, zoomée ou déplacée.
+        // Help panel visible but map not recognised in its default view: it is open, zoomed or moved.
+        // Capture the client area and hand it to the worker thread for a full search.
         self.next_global = now + Duration::from_millis(1500);
         let g = capture::grab_gray(x, y, w, h)?;
         let center = (sq.x0 + sq.side / 2.0, sq.y0 + sq.side / 2.0);
@@ -923,7 +1043,7 @@ impl App {
         None
     }
 
-    /// Apprend comment le jeu compte la molette, d'après le niveau réellement trouvé par un recalage.
+    /// Learns how the game counts wheel notches, from the level actually found by a resync.
     fn learn_wheel(&mut self, found: i32, n_a: i32, n_b: i32) {
         if n_a == n_b {
             return;
@@ -945,19 +1065,22 @@ impl App {
         if want.is_some() && want != self.cfg.wheel_per_event {
             self.cfg.wheel_per_event = want;
             self.cfg.save();
-            logf!("molette : le jeu compte {}", if want == Some(true) { "un cran par événement" } else { "un cran par tranche de 120" });
+            logf!("wheel: the game counts {}", if want == Some(true) { "one notch per event" } else { "one notch per 120 units" });
         }
     }
 
-    /// Reconstruit les points de la carte ouverte quand les données changent.
+    /// Rebuilds the open map's points when the data changes.
+    /// Also picks up what the network thread has received (status, key validation, update notice, search
+    /// data) and asks it for missing search data. No game data is involved: everything comes from the website.
     fn sync_data(&mut self) {
-        // Langue de l'interface : forcée, sinon celle du compte du site, sinon Windows (anglais par défaut).
+        // Interface language: forced, otherwise the website account's language, otherwise Windows' (English by default).
         let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
         let s = i18n::strings_for(&i18n::effective(&self.cfg.locale, account.as_deref()));
         if !std::ptr::eq(s, self.s) {
             self.s = s;
             self.dirty = true;
         }
+        // Network status → tray tooltip; API-key validation result → settings window.
         let mut sh = self.shared.lock().unwrap();
         let st = sh.status.clone();
         if st != self.last_status {
@@ -979,7 +1102,7 @@ impl App {
             self.update_hint_shown = true;
             tray::balloon(self.main, "Hunger Overlay", self.s.update_available);
         }
-        // Recherche d'objets : index (noms) et fichiers des objets cherchés, demandés une seule fois.
+        // Item search: index (names) and files of the searched items, requested from the website only once.
         let need_index = (!self.cfg.search_items.is_empty() || self.search.is_some()) && sh.search_index.is_none();
         if need_index && !self.index_requested {
             self.index_requested = true;
@@ -995,7 +1118,7 @@ impl App {
                 st.set_entries(search_entries(Some(ix), sh.pack.as_ref(), sh.tracker.as_ref()));
             }
         }
-        // Écriture refusée (suivi de quête) : on prévient l'utilisateur.
+        // Write refused by the website (quest tracking): tell the user.
         if let Some(n) = sh.notice.take() {
             let msg = match n {
                 "unsupported" => self.s.track_unsupported,
@@ -1005,6 +1128,7 @@ impl App {
             self.balloon_url = (n == "readonly").then(|| format!("{}/account/security#overlay-keys", self.cfg.base_url.trim_end_matches('/')));
             tray::balloon(self.main, "Hunger Overlay", msg);
         }
+        // New layers published by the website: remember them and switch on those that are on by default.
         if let Some(p) = sh.pack.as_ref() {
             let mut changed = false;
             for ly in &p.layers {
@@ -1021,6 +1145,7 @@ impl App {
                 self.cfg.save();
             }
         }
+        // Rebuild the markers / legend of the open map if the data or the display options changed.
         let MapState::Open(m) = &mut self.state else { return };
         if m.data_version == sh.version {
             return;
@@ -1058,8 +1183,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Recale la position/zoom de la carte sur la capture d'écran. Renvoie Some(true) si une correction a été appliquée.
-    /// Zones à ignorer pour le recalage : panneau d'aide du jeu et notre panneau.
+    /// Re-aligns the map position/zoom on the screen capture. Returns Some(true) if a correction was applied.
+    /// Areas to ignore for the resync: the game's help panel and our panel.
     fn masks(&self) -> Vec<(f64, f64, f64, f64)> {
         let mut v = vec![detect::panel_rect(self.client.3 as f64)];
         if let Some((l, t, r, b)) = self.legend_rect {
@@ -1068,10 +1193,11 @@ impl App {
         v
     }
 
-    /// Capture l'écran et envoie une recherche au fil de calcul.
+    /// Captures the screen (game client area, grayscale) and sends a search to the worker thread.
     fn start_resync(&mut self, m: &OpenMap, mode: Resync, now: Instant) -> bool {
         let (x, y, w, h) = self.client;
         let Some(g) = capture::grab_gray(x, y, w, h) else { return false };
+        // Predicted position of the map square, and the search range (zoom levels, radius) for this mode.
         let side = (1.0 + 0.5 * m.n as f64) * m.sq.side;
         let (cx, cy) = m.center();
         let pred = (cx + m.off.0 - side / 2.0, cy + m.off.1 - side / 2.0);
@@ -1085,6 +1211,7 @@ impl App {
         let mut zooms: Vec<i32> = (lo - span.min(1)..=hi + span.min(1)).chain(m.n - span..=m.n + span).filter(|n| (0..=ZOOM_MAX_N).contains(n)).collect();
         zooms.sort();
         zooms.dedup();
+        // Hand the job to the worker thread; the result is picked up later by `take_resync`.
         let id = self.rs_next_id;
         self.rs_next_id += 1;
         let center = (m.sq.x0 + m.sq.side / 2.0, m.sq.y0 + m.sq.side / 2.0);
@@ -1096,7 +1223,7 @@ impl App {
         true
     }
 
-    /// Résultat du fil de calcul correspondant à la demande en cours (ou abandon au bout de 5 s).
+    /// Worker-thread result matching the current request (or the request is dropped after 5 s).
     fn take_resync(&mut self) -> Option<(JobInfo, resync::Res)> {
         let info = self.rs_job.as_ref()?;
         let mut slot = self.rs_out.lock().unwrap();
@@ -1113,7 +1240,7 @@ impl App {
         Some((self.rs_job.take()?, res))
     }
 
-    /// Applique un résultat de recalage. Some(true) = corrigé, Some(false) = carte perdue, None = rien à faire.
+    /// Applies a resync result. Some(true) = corrected, Some(false) = map lost, None = nothing to do.
     fn apply_resync(&mut self, m: &mut OpenMap, info: &JobInfo, res: resync::Res, now: Instant) -> Option<bool> {
         let wide = info.mode == Resync::Wide;
         if wide {
@@ -1122,18 +1249,18 @@ impl App {
         if info.map_idx != m.map_idx || res.map != m.map_idx {
             return None;
         }
-        // La carte a bougé depuis la capture : résultat périmé (un nouveau recalage suivra le mouvement).
+        // The map moved since the capture: stale result (a new resync will follow the movement).
         if m.last_input > info.time {
             if wide {
                 m.resync_at = Some((now, true));
             }
             return None;
         }
-        // Recalage raté (score trop faible) : position incertaine → points masqués, recherche complète au repos.
+        // Failed resync (score too low): uncertain position → points hidden, full search at rest.
         let weak = res.found.as_ref().map(|f| f.score.max(f.score_pred) < 0.5).unwrap_or(true);
         if weak && !wide {
             if !m.uncertain {
-                logf!("position incertaine : points masqués, recherche complète");
+                logf!("uncertain position: points hidden, full search");
             }
             m.uncertain = true;
             m.next_idle_resync = now + Duration::from_millis(if info.mode == Resync::Global { 2500 } else { 300 });
@@ -1149,28 +1276,29 @@ impl App {
         if f.score >= 0.6 {
             m.n_sync = f.n;
         }
+        // Compare the found position with the predicted one; correct only if clearly better and different.
         let side_p = (1.0 + 0.5 * info.n as f64) * m.sq.side;
         let side_f = (1.0 + 0.5 * f.n as f64) * m.sq.side;
         let shift = ((f.x0 + side_f / 2.0 - (info.pred.0 + side_p / 2.0)).powi(2) + (f.y0 + side_f / 2.0 - (info.pred.1 + side_p / 2.0)).powi(2)).sqrt();
         let better = f.score > f.score_pred + 0.02 || f.score_pred < 0.4;
         let apply = f.score >= 0.6 && (f.n != info.n || shift > 2.0) && better;
         logf!(
-            "recalage {:?}{} : score {:.3} (prévu {:.3}) n {}→{} écart {:.1} px, {} ms{}",
+            "resync {:?}{}: score {:.3} (predicted {:.3}) n {}→{} offset {:.1} px, {} ms{}",
             info.mode,
-            if res.global_used { " + recherche complète" } else { "" },
+            if res.global_used { " + full search" } else { "" },
             f.score,
             f.score_pred,
             info.n,
             f.n,
             shift,
             res.ms,
-            if apply { " → CORRIGÉ" } else { "" }
+            if apply { " → CORRECTED" } else { "" }
         );
         if f.score >= 0.6 {
             self.learn_wheel(f.n, info.n_a, info.n_b);
         }
         if wide && f.score.max(f.score_pred) < 0.5 {
-            logf!("carte non retrouvée à l'écran après reprise");
+            logf!("map not found on screen again after resuming");
             return Some(false);
         }
         if apply {
@@ -1185,10 +1313,12 @@ impl App {
         apply.then_some(true)
     }
 
+    /// Marker radius in pixels (scaled with the window size and the user's marker-size setting).
     fn marker_r(&self) -> f64 {
         (9.0 * self.sc() * self.cfg.marker_scale).max(5.0) as f64
     }
 
+    /// Index of the marker closest to the mouse cursor (within the marker radius), for the tooltip.
     fn compute_hover(&self) -> Option<usize> {
         let MapState::Open(m) = &self.state else { return None };
         if m.drag.is_some() {
@@ -1213,8 +1343,10 @@ impl App {
         best
     }
 
-    // ---------- Dessin ----------
+    // ---------- Drawing ----------
+    // Everything is drawn into our own windows (overlay + panel); nothing is drawn into the game.
 
+    /// Shows or hides the clickable panel window (without taking focus from the game).
     fn show_panel(&mut self, on: bool) {
         if on != self.panel_shown {
             self.panel_shown = on;
@@ -1227,6 +1359,7 @@ impl App {
         }
     }
 
+    /// Redraws the overlay: markers projected onto the map, then the legend panel and the tooltip.
     fn draw(&mut self) {
         let lang_label = self.lang_label();
         let (gx, gy, gw, gh) = self.client;
@@ -1239,6 +1372,7 @@ impl App {
             self.renderer.present(self.overlay, gx, gy);
             return;
         };
+        // Markers: skipped while the position is uncertain, and clipped to the window and to the map texture.
         let r = &self.renderer;
         let rad = self.marker_r() as f32;
         let hide_points = m.uncertain;
@@ -1261,7 +1395,7 @@ impl App {
             let c: Rgba = (p.color.0, p.color.1, p.color.2, if p.locked { 0.45 } else { 1.0 });
             let layer_id = p.layer.and_then(|li| m.layers.get(li)).map(|l| l.id.as_str());
             if p.place || layer_id == Some("places") {
-                // Lieu nommé : losange plein bien visible + son nom à côté.
+                // Named place: clearly visible filled diamond + its name next to it.
                 let dr = rad * 1.25;
                 let gold: Rgba = if p.place { c } else { (0.95, 0.78, 0.35, 1.0) };
                 r.diamond(x, y, dr, 7.0 * sc, (0.0, 0.0, 0.0, 0.75));
@@ -1274,14 +1408,14 @@ impl App {
                     r.text(&p.label, Font::Small, lx, ly, tw + 2.0, (0.97, 0.92, 0.8, 1.0));
                 }
             } else if layer_id == Some("player_spawns") {
-                // Point d'apparition des joueurs : grand rond bien contrasté.
+                // Player spawn point: large, high-contrast circle.
                 let sr = rad * 1.05;
                 r.fill_circle(x, y, sr + 3.0 * sc, (0.0, 0.0, 0.0, 0.7));
                 r.fill_circle(x, y, sr, c);
                 r.stroke_circle(x, y, sr, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
                 r.stroke_circle(x, y, sr * 0.45, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
             } else if p.layer.is_some() {
-                // Point de calque : plus petit et plus discret que les objectifs.
+                // Layer point: smaller and more discreet than the objectives.
                 let lr = rr * 0.62;
                 if p.diamond {
                     r.diamond(x, y, lr * 1.35, 3.5 * sc, (0.0, 0.0, 0.0, 0.7));
@@ -1291,20 +1425,22 @@ impl App {
                     r.fill_circle(x, y, lr, c);
                 }
             } else if p.placed {
-                // Loot posé : losange plein.
+                // Placed loot: filled diamond.
                 r.diamond(x, y, rr * 1.15, 6.0 * sc, (0.0, 0.0, 0.0, 0.6));
                 r.diamond(x, y, rr * 1.15, 3.5 * sc, c);
                 r.diamond(x, y, rr * 0.6, 4.5 * sc, c);
             } else if p.harvest.is_some() {
-                // Nœud de récolte : carré arrondi (grisé si le niveau requis dépasse celui du joueur).
+                // Harvest node: rounded square (greyed out if the required level is above the player's).
                 let hr = rr * 0.95;
                 r.fill_rrect(x - hr - 2.0 * sc, y - hr - 2.0 * sc, x + hr + 2.0 * sc, y + hr + 2.0 * sc, 3.0 * sc, (0.0, 0.0, 0.0, 0.55));
                 r.fill_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, c);
                 r.stroke_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, 1.4 * sc, (1.0, 1.0, 1.0, if p.locked { 0.5 } else { 0.95 }));
             } else if p.done {
+                // Completed objective: small grey circle.
                 r.fill_circle(x, y, rr * 0.8, (0.35, 0.35, 0.35, 0.65));
                 r.stroke_circle(x, y, rr * 0.8, 1.5 * sc, (0.9, 0.9, 0.9, 0.7), false);
             } else {
+                // Quest objective: coloured disc with a white ring and centre (dashed outer ring if optional).
                 r.fill_circle(x, y, rr + 2.5 * sc, (0.0, 0.0, 0.0, 0.55));
                 r.fill_circle(x, y, rr, c);
                 r.stroke_circle(x, y, rr, 1.6 * sc, (1.0, 1.0, 1.0, 0.95), false);
@@ -1314,8 +1450,8 @@ impl App {
                 }
             }
         }
-        // Panneau : à droite de la carte par défaut, ou là où l'utilisateur l'a déplacé (position mémorisée en
-        // fractions de la fenêtre, pour rester valable à une autre résolution).
+        // Panel: to the right of the map by default, or wherever the user moved it (position stored as
+        // fractions of the window, so it stays valid at another resolution).
         let max_w = if self.cfg.panel_collapsed { 300.0 } else { 430.0 } * sc;
         let (right, top, lw) = match self.cfg.panel_pos {
             Some((fx, fy)) => {
@@ -1350,6 +1486,7 @@ impl App {
             }
             legend_rect = Some((right, top, right + pw as f32, top + ph as f32));
         }
+        // Tooltip for the hovered marker.
         if let Some(i) = self.hover.filter(|_| !hide_points) {
             if let Some(p) = m.points.get(i) {
                 let (x, y) = m.project(p.u, p.v);
@@ -1358,8 +1495,8 @@ impl App {
                     Some(li) => m.layers.get(li).map(|l| l.title.as_str()).unwrap_or(""),
                     None => lq.map(|q| q.title.as_str()).unwrap_or(""),
                 };
-                // Infobulle = ce point seulement : l'objectif, puis le conteneur et SA chance.
-                // (Le résumé « Meilleur : … · Ennemis : … » concerne tout l'objectif : il reste dans le panneau.)
+                // Tooltip = this point only: the objective, then the container and ITS chance.
+                // (The "Best: … · Enemies: …" summary is about the whole objective: it stays in the panel.)
                 let mut lines = vec![];
                 let obj = p.objective.and_then(|oi| lq.and_then(|q| q.objectives.get(oi)));
                 if let Some(o) = obj {
@@ -1401,13 +1538,15 @@ impl App {
                 draw_tooltip(r, title, p.color, &lines, x as f32, y as f32, gw as f32, gh as f32, sc);
             }
         }
+        // Push the finished image to the transparent overlay window.
         self.renderer.present(self.overlay, gx, gy);
         self.legend_rect = legend_rect;
         self.show_panel(legend_rect.is_some());
     }
 
-    // ---------- Recherche d'objet ----------
+    // ---------- Item search ----------
 
+    /// Opens the "Search for an item" window (or brings it to the front); fetches the item index if needed.
     fn open_search(&mut self) {
         if let Some(s) = &self.search {
             unsafe {
@@ -1426,14 +1565,16 @@ impl App {
         self.search = search::Search::open(self.s, &self.cfg.theme, Some(entries), loaded, self.client);
     }
 
+    /// An entry was picked in the search window: a quest is (un)tracked, an item is added to the map.
     fn search_pick(&mut self, key: String) {
-        // Quête : suivre / ne plus suivre (écriture sur le compte, le site renvoie le nouveau tracker).
+        // Quest: track / untrack (written to the website account; the website returns the new tracker).
         if let Some(qid) = key.strip_prefix("quest:") {
             let tracked = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.tracked.iter().any(|q| q.quest_id == qid)).unwrap_or(false);
             let _ = self.net.send(Req::Track { quest_id: qid.to_string(), tracked: !tracked });
             self.close_search();
             return;
         }
+        // Item: remember it in the settings and download its (public) marker file.
         if !self.cfg.search_items.contains(&key) {
             self.cfg.search_items.push(key.clone());
             self.cfg.save();
@@ -1448,11 +1589,12 @@ impl App {
         self.dirty = true;
     }
 
+    /// Closes the search window and gives the focus back to the game.
     fn close_search(&mut self) {
         if let Some(s) = self.search.take() {
             s.close();
         }
-        // Retour au jeu (on est au premier plan, donc autorisé).
+        // Back to the game (we are in the foreground, so this is allowed).
         unsafe {
             let mut game = HWND::default();
             let _ = EnumWindows(Some(find_game), LPARAM(&mut game as *mut HWND as isize));
@@ -1462,8 +1604,9 @@ impl App {
         }
     }
 
-    // ---------- Paramètres ----------
+    // ---------- Settings ----------
 
+    /// Opens the settings window (or brings it to the front), pre-filled with the current settings.
     fn open_settings(&mut self) {
         if let Some(s) = self.settings.as_mut() {
             unsafe {
@@ -1495,6 +1638,7 @@ impl App {
         );
     }
 
+    /// Handles a button / control of the settings window.
     fn settings_command(&mut self, id: i32) {
         match id {
             settings::ID_CHANCE => {
@@ -1513,6 +1657,7 @@ impl App {
                     s.set_mapkey_text(self.s.press_key);
                 }
             }
+            // "Test" button: checks the typed API key's format, then asks the website whether it is valid.
             settings::ID_TEST => {
                 if let Some(s) = self.settings.as_mut() {
                     let k = s.key_text();
@@ -1552,7 +1697,7 @@ impl App {
 }
 
 impl App {
-    /// Installe une mise à jour téléchargée, jamais pendant que la carte est affichée ; vérifie toutes les 6 h.
+    /// Installs a downloaded update, never while the map is shown; checks every 6 h.
     fn maybe_install_update(&mut self, now: Instant) {
         if now >= self.next_update_check {
             self.next_update_check = now + Duration::from_secs(6 * 3600);
@@ -1566,19 +1711,20 @@ impl App {
         }
         let ready = self.shared.lock().unwrap().update_ready.take();
         let Some((version, path)) = ready else { return };
-        logf!("installation de la version {version}");
+        logf!("installing version {version}");
         tray::remove(self.main);
         match update::install_and_restart(&path) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
-                logf!("mise à jour impossible : {e}");
+                logf!("update failed: {e}");
                 tray::add(self.main, WM_TRAY, "Hunger Overlay");
                 tray::balloon(self.main, "Hunger Overlay", self.s.update_available);
             }
         }
     }
 
-    /// Applique les valeurs de la fenêtre de paramètres (sans la fermer). Renvoie false si la clé est invalide.
+    /// Applies the values of the settings window (without closing it). Returns false if the key is invalid.
+    /// Settings are saved locally (see `config.rs`).
     fn apply_settings(&mut self) -> bool {
         let msg = self.s.st_bad_format;
         let Some(s) = self.settings.as_mut() else { return false };
@@ -1607,19 +1753,20 @@ impl App {
         self.cfg.save();
         self.apply_capture_affinity();
         if net_changed {
-            // Nouvelle clé ou langue : on recharge (le plafond horaire reste appliqué par le thread réseau).
+            // New key or language: reload (the hourly cap is still enforced by the network thread).
             self.configure_net();
             let _ = self.net.send(Req::Refresh { force: true });
         }
         if let MapState::Open(m) = &mut self.state {
-            m.data_version = u64::MAX; // reconstruit les points (filtre de chance, terminés…)
+            m.data_version = u64::MAX; // rebuilds the points (chance filter, completed…)
         }
         self.dirty = true;
-        logf!("paramètres appliqués (touche 0x{:02X}, chance min {} %)", self.cfg.map_vk, self.cfg.min_chance);
+        logf!("settings applied (key 0x{:02X}, min chance {} %)", self.cfg.map_vk, self.cfg.min_chance);
         true
     }
 }
 
+/// User-facing text for a network status.
 fn status_text(s: &i18n::Strings, st: Option<&Status>) -> &'static str {
     match st {
         Some(Status::Ok) | None => s.st_ok,
@@ -1630,6 +1777,7 @@ fn status_text(s: &i18n::Strings, st: Option<&Status>) -> &'static str {
     }
 }
 
+/// Draws a marker's tooltip (title + lines) next to (x, y), kept inside the window.
 #[allow(clippy::too_many_arguments)]
 fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[String], x: f32, y: f32, gw: f32, gh: f32, sc: f32) {
     let pad = 10.0 * sc;
@@ -1662,7 +1810,7 @@ fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[Stri
     }
 }
 
-/// Entrées de la recherche : les quêtes du pack (titre traduit, donneur, déjà suivie ?) puis les objets de l'index.
+/// Search entries: the pack's quests (translated title, giver, already tracked?) then the index's items.
 fn search_entries(ix: Option<&model::SearchIndex>, pack: Option<&model::Pack>, tracker: Option<&model::Tracker>) -> Vec<search::Entry> {
     let mut out = vec![];
     if let Some(p) = pack {
@@ -1691,6 +1839,7 @@ fn search_entries(ix: Option<&model::SearchIndex>, pack: Option<&model::Pack>, t
     out
 }
 
+/// `EnumWindows` callback: stores the first visible game window into the `HWND` pointed to by `lp`.
 unsafe extern "system" fn find_game(h: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
     if IsWindowVisible(h).as_bool() && is_game_window(h) {
         *(lp.0 as *mut HWND) = h;
@@ -1699,24 +1848,27 @@ unsafe extern "system" fn find_game(h: HWND, lp: LPARAM) -> windows::Win32::Foun
     true.into()
 }
 
+/// Access to the open search window (from its window procedure).
 pub fn with_search<R>(f: impl FnOnce(&mut search::Search) -> R) -> Option<R> {
     with_app(|a| a.search.as_mut().map(f)).flatten()
 }
 
+/// Called by the search window when an entry is picked.
 pub fn on_search_pick(key: String) {
     with_app(|a| a.search_pick(key));
 }
 
+/// Called by the search window when it is closed.
 pub fn on_search_close() {
     with_app(|a| a.close_search());
 }
 
-/// Accès à la fenêtre de paramètres ouverte (depuis sa procédure de fenêtre).
+/// Access to the open settings window (from its window procedure).
 pub fn with_settings<R>(f: impl FnOnce(&mut settings::Settings) -> R) -> Option<R> {
     with_app(|a| a.settings.as_mut().map(f)).flatten()
 }
 
-/// Clic dans la fenêtre de paramètres : géré par la fenêtre, puis par l'appli pour les actions globales.
+/// Click in the settings window: handled by the window, then by the app for global actions.
 pub fn on_settings_click(x: f32, y: f32, down: bool) {
     with_app(|a| {
         let act = a.settings.as_mut().and_then(|s| s.click(x, y, down));
@@ -1726,11 +1878,14 @@ pub fn on_settings_click(x: f32, y: f32, down: bool) {
     });
 }
 
-/// Appelé par la fenêtre de paramètres.
+/// Called by the settings window.
 pub fn on_settings_command(id: i32) {
     with_app(|a| a.settings_command(id));
 }
 
+/// Decodes one WM_INPUT (Raw Input) message: keyboard key up/down, or mouse buttons / wheel.
+/// Raw Input is read-only here: the event still reaches the game unchanged (the message is passed on to
+/// DefWindowProcW and nothing is blocked, consumed or injected).
 fn handle_raw_input(lp: LPARAM) {
     unsafe {
         let mut size = 0u32;
@@ -1759,8 +1914,10 @@ fn handle_raw_input(lp: LPARAM) {
     }
 }
 
+/// Window procedure of the hidden main window: Raw Input, timers, network notifications, tray icon and menu.
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        // Passively observed keyboard / mouse input.
         WM_INPUT => {
             handle_raw_input(lp);
             DefWindowProcW(hwnd, msg, wp, lp)
@@ -1776,6 +1933,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             LRESULT(0)
         }
+        // The network thread received new data or a new status.
         WM_NET => {
             with_app(|a| {
                 a.dirty = true;
@@ -1792,7 +1950,8 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             } else if ev == WM_LBUTTONDBLCLK {
                 with_app(|a| a.open_settings());
             } else if ev == 0x0405 {
-                // NIN_BALLOONUSERCLICK : ouvrir la page liée à la notification (ex. réglage de la clé).
+                // NIN_BALLOONUSERCLICK: open the page linked to the notification (e.g. the key settings page).
+                // Only https:// links are opened, in the user's default browser.
                 if let Some(url) = with_app(|a| a.balloon_url.take()).flatten() {
                     if url.starts_with("https://") {
                         let w = wide(&url);
@@ -1802,6 +1961,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             LRESULT(0)
         }
+        // Tray-menu commands.
         WM_COMMAND => {
             match wp.0 & 0xffff {
                 tray::ID_SETTINGS => {
@@ -1828,12 +1988,14 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             LRESULT(0)
         }
+        // Quit: remove the tray icon and end the message loop.
         WM_DESTROY => {
             tray::remove(hwnd);
             PostQuitMessage(0);
             LRESULT(0)
         }
         _ => {
+            // Explorer restarted ("TaskbarCreated"): add the tray icon again.
             let tc = with_app(|a| a.taskbar_created).unwrap_or(0);
             if tc != 0 && msg == tc {
                 tray::add(hwnd, WM_TRAY, "Hunger Overlay");
@@ -1844,10 +2006,12 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+/// Window procedure of the clickable legend panel (our own window): hover, click, move by its grip.
+/// Clicks on it are handled by the overlay only and never forwarded to the game.
 unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let pos = || (((lp.0 & 0xffff) as i16) as f32, (((lp.0 >> 16) & 0xffff) as i16) as f32);
     match msg {
-        WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE : le jeu garde le focus
+        WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE: the game keeps the focus
         WM_MOUSEMOVE => {
             let (x, y) = pos();
             let mut tme = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
@@ -1885,7 +2049,7 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             LRESULT(0)
         }
         WM_LBUTTONDBLCLK => {
-            // Double-clic sur la poignée : retour à la position par défaut.
+            // Double-click on the grip: back to the default position.
             let (x, y) = pos();
             with_app(|a| {
                 if a.panel_hits.iter().any(|h| h.contains(x, y) && h.action == panel::Action::Move) {
@@ -1911,17 +2075,19 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
     }
 }
 
+/// Window procedure of the marker overlay: fully click-through and never activated.
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT : les clics passent au jeu
+        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT: clicks go through to the game
         WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
 
+/// Handle of the "single instance" mutex (0 = none).
 static SINGLE_INSTANCE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Libère le verrou « une seule instance » (avant de lancer la version mise à jour).
+/// Releases the "single instance" lock (before launching the updated version).
 pub fn release_single_instance() {
     let h = SINGLE_INSTANCE.swap(0, std::sync::atomic::Ordering::SeqCst);
     if h != 0 {
@@ -1932,12 +2098,15 @@ pub fn release_single_instance() {
     }
 }
 
+/// Entry point: single-instance check, creation of the three windows (hidden main window, click-through
+/// overlay, clickable panel), passive Raw Input registration, network and resync threads, tray icon,
+/// then the Windows message loop.
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let s = i18n::t();
         let updated = std::env::args().any(|a| a == "--updated");
-        // Après une mise à jour, l'ancienne instance peut mettre un instant à se fermer : on attend un peu.
+        // After an update, the old instance may take a moment to close: wait a little.
         let mut tries = if updated { 50 } else { 1 };
         loop {
             let m = CreateMutexW(None, true, w!("Local\\HungerOverlay.SingleInstance"));
@@ -1958,10 +2127,11 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         log::init();
-        logf!("démarrage v{}{}", env!("CARGO_PKG_VERSION"), if updated { " (après mise à jour)" } else { "" });
+        logf!("starting v{}{}", env!("CARGO_PKG_VERSION"), if updated { " (after update)" } else { "" });
         update::cleanup();
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
 
+        // Window classes and windows. The main window is never shown; it only receives messages.
         let inst = GetModuleHandleW(None).unwrap();
         let main_class = w!("HungerOverlayMain");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(main_proc), hInstance: inst.into(), lpszClassName: main_class, ..Default::default() });
@@ -1976,7 +2146,7 @@ fn main() {
         let main = CreateWindowExW(WINDOW_EX_STYLE(0), main_class, w!("Hunger Overlay"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, inst, None).unwrap();
         let panel_class = w!("HungerOverlayPanel");
         RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(panel_proc), hInstance: inst.into(), lpszClassName: panel_class, ..Default::default() });
-        // Pas de WS_EX_TRANSPARENT : ce panneau reçoit les clics (sans s'activer).
+        // No WS_EX_TRANSPARENT: this panel receives clicks (without being activated).
         let panel = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             panel_class,
@@ -1992,6 +2162,8 @@ fn main() {
             None,
         )
         .unwrap();
+        // Marker overlay: layered (per-pixel transparency), WS_EX_TRANSPARENT (click-through), topmost,
+        // no taskbar entry, never activated.
         let overlay = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ov_class,
@@ -2008,14 +2180,19 @@ fn main() {
         )
         .unwrap();
 
+        // Raw Input for the keyboard (usage 6) and the mouse (usage 2), with RIDEV_INPUTSINK so events are
+        // also received while the game has the focus. This is passive: Windows delivers a copy of each
+        // event to us; the game still receives it normally (no RIDEV_NOLEGACY, no hook, nothing blocked).
         let devices = [
             RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_INPUTSINK, hwndTarget: main },
             RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: main },
         ];
         if RegisterRawInputDevices(&devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32).is_err() {
-            logf!("RegisterRawInputDevices a échoué");
+            logf!("RegisterRawInputDevices failed");
         }
 
+        // Network thread (HTTPS to the website only) and resync worker thread (image matching on captures,
+        // all local); both wake the UI thread with WM_NET when they have something new.
         let shared: SharedRef = Arc::new(Mutex::new(Default::default()));
         let main_id = main.0 as isize;
         let net = net::spawn(
@@ -2074,6 +2251,7 @@ fn main() {
             index_requested: false,
             next_update_check: Instant::now() + Duration::from_secs(6 * 3600),
         };
+        // Apply the settings, check for an update, show the tray icon; open the settings if no API key is set yet.
         app.apply_capture_affinity();
         app.configure_net();
         let _ = app.net.send(Req::CheckUpdate { install: app.cfg.auto_update });
@@ -2094,6 +2272,7 @@ fn main() {
         SetTimer(main, TIMER_TICK, 15, None);
         SetTimer(main, TIMER_TRIM, 20_000, None);
 
+        // Standard Windows message loop (the settings window is a dialog-like window: Tab/Enter handling).
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let dlg = with_app(|a| a.settings.as_ref().map(|s| s.hwnd)).flatten();
@@ -2105,6 +2284,6 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        logf!("arrêt");
+        logf!("shutdown");
     }
 }

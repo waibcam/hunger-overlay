@@ -1,28 +1,30 @@
-"""Génère les assets embarqués dans l'exe :
-- assets/ref_Map0X.bin : vignette 128x128 en niveaux de gris (u8) de la texture de carte du jeu, pour identifier la carte ouverte.
-- assets/ref512_Map0X.bin : la même en 512x512, pour le recalage visuel.
-- assets/icon.ico : icône de l'appli.
-Usage : python tools/make_assets.py <dossier atlas>   (ex. HungerDB/export/maps/atlas)
+"""Generates the assets embedded in the executable:
+- assets/ref_Map0X.bin: 128x128 grayscale (u8) thumbnail of the game's map texture, used to identify which map is open.
+- assets/ref512_Map0X.bin: the same at 512x512, used for visual alignment.
+- assets/icon.ico: the application icon.
+Usage: python tools/make_assets.py <atlas folder>   (e.g. HungerDB/export/maps/atlas)
 """
 import sys, os, io
 import numpy as np
 from PIL import Image, ImageDraw
 
-atlas = sys.argv[1]
-here = os.path.join(os.path.dirname(__file__), '..', 'assets')
+atlas = sys.argv[1]  # folder holding the game's map textures (T_UI_Map_Map0X_01a.webp)
+here = os.path.join(os.path.dirname(__file__), '..', 'assets')  # output folder: <repo>/assets
 N = 128
+# --- Map reference textures: one per raid map ---
 for m in ('Map01', 'Map02', 'Map03'):
     im = Image.open(os.path.join(atlas, f'T_UI_Map_{m}_01a.webp')).convert('L')
-    # 512x512 : recalage visuel (position exacte de la carte quand elle est zoomée/déplacée).
-    # Stockée sur 4 bits (2 pixels par octet) pour alléger l'exe ; la corrélation y est insensible.
+    # 512x512: visual alignment (exact position of the map when it is zoomed/panned).
+    # Stored on 4 bits (2 pixels per byte) to keep the exe small; the correlation is insensitive to this.
     big = np.asarray(im.resize((512, 512), Image.BOX), dtype=np.uint8)
     q = (big.astype(np.uint16) * 15 + 127) // 255
     packed = (q[:, 0::2] << 4 | q[:, 1::2]).astype(np.uint8)
     packed.tofile(os.path.join(here, f'ref512_{m}.bin'))
     print(m, big.shape)
 
-# icône « HC » (assets/icon_source.png, image d'origine, non versionnée car lourde ; sinon assets/icon_512.png).
-# Grandes tailles = image complète ; petites tailles (≤ 32 px) = recadrage sur les lettres « HC », sinon illisible.
+# --- Application icon ---
+# "HC" icon (assets/icon_source.png = original image, not committed because it is large; otherwise assets/icon_512.png).
+# Large sizes = full image; small sizes (<= 32 px) = cropped to the "HC" letters, otherwise unreadable.
 from PIL import ImageEnhance
 src_path = os.path.join(here, 'icon_source.png')
 if not os.path.exists(src_path):
@@ -36,17 +38,19 @@ frames = {}
 for size in (16, 20, 24, 32, 48, 64, 256):
     base = crop if size <= 32 else full
     frames[size] = base.resize((size, size), Image.LANCZOS)
-# Pillow écrit chaque taille depuis l'image fournie : on assemble l'ICO à la main pour garder les deux variantes.
+# Pillow writes every size from the single image it is given: we assemble the ICO by hand to keep both variants.
 import struct
 entries, blobs = [], []
 for size, img in frames.items():
-    # Palette de 256 couleurs (l'icône est opaque) : PNG bien plus léger, sans différence visible.
+    # 256-colour palette (the icon is opaque): much lighter PNG, with no visible difference.
     b = io.BytesIO(); img.convert('RGB').quantize(256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG).save(b, 'PNG', optimize=True); data = b.getvalue()
     entries.append((size, data))
+# ICO layout: 6-byte ICONDIR header, then one 16-byte ICONDIRENTRY per image, then the PNG blobs.
 offset = 6 + 16 * len(entries)
 out = struct.pack('<HHH', 0, 1, len(entries))
 body = b''
 for size, data in entries:
+    # width/height (256 is stored as 0), no palette, reserved, 1 plane, 32 bpp, blob size, blob offset.
     out += struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), offset + len(body))
     body += data
 open(os.path.join(here, 'icon.ico'), 'wb').write(out + body)

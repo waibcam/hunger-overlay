@@ -1,76 +1,112 @@
-//! Panneau cliquable posé sur la carte (à la place de la légende) : quêtes suivies, réglages rapides et accès
-//! aux paramètres. C'est une petite fenêtre séparée qui reçoit les clics SANS prendre le focus au jeu
-//! (WS_EX_NOACTIVATE) ; le reste de l'overlay laisse passer tous les clics vers le jeu.
+//! Clickable panel placed over the map (in place of the legend): tracked quests, quick settings and access
+//! to the settings window. It is a small separate window that receives clicks WITHOUT taking focus away
+//! from the game (WS_EX_NOACTIVATE); the rest of the overlay lets every click pass through to the game.
 
 use crate::i18n::Strings;
 use crate::model::{LegendLayer, LegendQuest};
 use crate::net::Status;
 use crate::render::{Font, Renderer, Rgba};
 
+/// What a click on a panel zone does (handled by the panel window's owner).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Poignée : glisser pour déplacer le panneau, double-clic pour le remettre à sa place.
+    /// Handle: drag to move the panel, double-click to put it back in its default place.
     Move,
+    /// Open the settings window.
     Settings,
+    /// Collapse / expand the panel to its title bar.
     Collapse,
+    /// Show / hide objectives that are already done.
     ToggleDone,
+    /// Lower the minimum loot chance filter.
     ChanceDown,
+    /// Raise the minimum loot chance filter.
     ChanceUp,
+    /// Switch the display language.
     Language,
+    /// Hide / show one tracked quest (by quest id).
     ToggleQuest(String),
+    /// Turn one map layer on / off (by layer id).
     ToggleLayer(String),
+    /// Open the item search window.
     Search,
+    /// Remove one item search from the map (by search key).
     RemoveSearch(String),
 }
 
-/// Zone cliquable (coordonnées locales au panneau).
+/// Clickable zone (coordinates local to the panel).
 #[derive(Debug, Clone)]
 pub struct Hit {
+    /// Left edge.
     pub l: f32,
+    /// Top edge.
     pub t: f32,
+    /// Right edge.
     pub r: f32,
+    /// Bottom edge.
     pub b: f32,
+    /// What clicking this zone does.
     pub action: Action,
 }
 
 impl Hit {
+    /// True if the point (x, y) lies inside this zone (edges included).
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.l && x <= self.r && y >= self.t && y <= self.b
     }
 }
 
+/// Everything the panel displays, gathered by the caller for one layout/draw pass.
 pub struct View<'a> {
+    /// UI strings in the current language.
     pub s: &'static Strings,
+    /// Tracked quests (and item searches) with their objectives, for the current map.
     pub legend: &'a [LegendQuest],
+    /// Optional map layers offered by the pack.
     pub layers: &'a [LegendLayer],
+    /// Connection / key status, if known.
     pub status: Option<&'a Status>,
+    /// Whether objectives already done are listed.
     pub show_done: bool,
+    /// Minimum loot chance (percent) below which loot markers are hidden.
     pub min_chance: u32,
+    /// Label of the current language (shown on the language button).
     pub lang_label: String,
+    /// Panel reduced to its title bar.
     pub collapsed: bool,
-    /// Opacité du fond (0..1).
+    /// Background opacity (0..1).
     pub opacity: f32,
 }
 
+/// Main text colour.
 const TEXT: Rgba = (0.97, 0.95, 0.9, 1.0);
+/// Dimmed text (secondary info, hidden quests).
 const DIM: Rgba = (0.7, 0.68, 0.62, 1.0);
+/// Accent colour for titles and icons.
 const GOLD: Rgba = (0.93, 0.88, 0.76, 1.0);
+/// Warning colour (key / network problems, filtered markers).
 const WARN: Rgba = (1.0, 0.72, 0.45, 1.0);
 
-/// Met en page le panneau ; dessine si `draw` est vrai. Renvoie (hauteur, zones cliquables).
+/// Lays out the panel; draws it if `draw` is true. Returns (height, clickable zones).
+///
+/// The same function is used twice: once with `draw = false` to measure the height, then with
+/// `draw = true` to paint. `hover` is the index of the hovered zone in the returned list, so zones
+/// must be pushed in the same order in both passes. `sc` is the UI scale factor.
 pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option<usize>, draw: bool) -> (f32, Vec<Hit>) {
     let s = v.s;
     let pad = 14.0 * sc;
     let iw = w - 2.0 * pad;
     let mut hits: Vec<Hit> = vec![];
     let mut y = pad;
+    // True if the zone about to be pushed (index = current length) is the hovered one.
     let hov = |hits: &Vec<Hit>| hover.map(|h| h == hits.len()).unwrap_or(false);
+    // Background and border.
     if draw {
         r.fill_rrect(0.5, 0.5, w - 0.5, max_h.max(1.0) - 0.5, 8.0 * sc, (0.07, 0.06, 0.05, v.opacity));
         r.stroke_rrect(0.5, 0.5, w - 0.5, max_h.max(1.0) - 0.5, 8.0 * sc, 1.0 * sc, (0.85, 0.75, 0.55, 0.35));
     }
 
-    // Petit bouton (puce) : renvoie sa largeur.
+    // Small button (chip): returns its width.
     let chip = |hits: &mut Vec<Hit>, x: f32, y: f32, text: &str, action: Action, accent: bool| -> f32 {
         let (tw, th) = r.measure(text, Font::Small, 400.0 * sc);
         let (cw, ch) = (tw + 16.0 * sc, th + 8.0 * sc);
@@ -85,11 +121,12 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         cw
     };
 
-    // 1. Titre + boutons « réduire » et « paramètres ».
+    // 1. Title + "collapse" and "settings" buttons.
     let (_, th) = r.measure(s.legend_title, Font::Title, iw);
     let (gw, gh) = r.measure("⚙", Font::Bold, 100.0);
-    let gs = gw.max(gh) + 8.0 * sc;
-    let icon_btn = |hits: &mut Vec<Hit>, x: f32, glyph: &str, action: Action| {
+    let gs = gw.max(gh) + 8.0 * sc; // side of the square icon buttons
+    // Square icon button on the title row.
+    let icon_btn =|hits: &mut Vec<Hit>, x: f32, glyph: &str, action: Action| {
         if draw {
             let (bw, bh) = r.measure(glyph, Font::Bold, 100.0);
             if hover.map(|h| h == hits.len()).unwrap_or(false) {
@@ -100,6 +137,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         }
         hits.push(Hit { l: x, t: y, r: x + gs, b: y + gs, action });
     };
+    // Buttons right-aligned, from right to left: settings, collapse, move.
     let gx = w - pad - gs;
     let cx = gx - gs - 6.0 * sc;
     let mx = cx - gs - 6.0 * sc;
@@ -111,7 +149,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     icon_btn(&mut hits, gx, "⚙", Action::Settings);
     y += gs + 8.0 * sc;
 
-    // 2. Problème de clé / réseau.
+    // 2. Key / network problem. The bool says whether to offer a "set up" button (key problems only).
     let warn = match v.status {
         Some(Status::NoKey) => Some((s.st_no_key, true)),
         Some(Status::InvalidKey) => Some((s.st_invalid_key, true)),
@@ -133,12 +171,12 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         }
     }
 
-    // Panneau réduit : seulement la barre de titre (et l'éventuel problème de clé).
+    // Collapsed panel: only the title bar (and the key problem, if any).
     if v.collapsed {
         return ((y + pad - 12.0 * sc).min(max_h), hits);
     }
 
-    // 3. Réglages rapides (sur une ou deux lignes selon la largeur).
+    // 3. Quick settings (on one or two rows depending on the width).
     let done_t = format!("{} {}", if v.show_done { "☑" } else { "☐" }, s.panel_done);
     let chance_t = format!("{} {} %", s.panel_chance, v.min_chance);
     let lang_t = format!("🌐 {}", v.lang_label);
@@ -155,12 +193,13 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     for (i, (t, a)) in items.iter().enumerate() {
         let (tw, _) = r.measure(t, Font::Small, 400.0 * sc);
         let cw = tw + 16.0 * sc;
+        // Wrap to a new row when the item does not fit.
         if x + cw > w - pad && x > pad {
             x = pad;
             y += row_h + 6.0 * sc;
         }
         if i == 2 {
-            // Libellé de la chance : texte simple entre les boutons − et +.
+            // Chance label: plain text between the − and + buttons.
             if draw {
                 r.text(t, Font::Small, x + 4.0 * sc, y + 4.0 * sc, tw + 2.0, TEXT);
             }
@@ -169,7 +208,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         }
         x += chip(&mut hits, x, y, t, a.clone(), false) + 6.0 * sc;
     }
-    // Recherche d'objet : sur sa propre ligne.
+    // Item search: on its own row, followed by a separator line.
     y += row_h + 6.0 * sc;
     chip(&mut hits, pad, y, s.panel_search, Action::Search, false);
     y += row_h + 10.0 * sc;
@@ -178,7 +217,8 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     }
     y += 4.0 * sc;
 
-    // 4. Quêtes suivies (clic sur le titre = masquer / réafficher).
+    // 4. Tracked quests (click on the title = hide / show again).
+    // "No tracked quest" hint, unless a key problem already explains why the list is empty.
     if v.legend.is_empty() && !matches!(warn, Some((_, true))) {
         let (_, h) = r.measure(s.legend_none, Font::Small, iw);
         if draw {
@@ -188,9 +228,11 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     }
     let gap = 3.0 * sc;
     for q in v.legend {
+        // Measuring pass: stop once the panel is full.
         if y > max_h - pad - 10.0 * sc && !draw {
             break;
         }
+        // Item searches appear as pseudo-quests whose id starts with "find:"; clicking removes them.
         let find_key = q.quest_id.strip_prefix("find:");
         let title = if q.hidden {
             format!("{}  ({})", q.title, s.panel_hidden)
@@ -201,6 +243,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         };
         let indent = 20.0 * sc;
         let (_, h) = r.measure(&title, Font::Bold, iw - indent);
+        // Quest title row: colour dot + title (dimmed when hidden).
         if draw {
             if hov(&hits) {
                 r.fill_rrect(pad - 6.0 * sc, y - 2.0 * sc, w - pad + 6.0 * sc, y + h + 2.0 * sc, 4.0 * sc, (1.0, 1.0, 1.0, 0.08));
@@ -219,6 +262,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         if q.hidden {
             continue;
         }
+        // No marker on this map: explain whether they are filtered out or on another map.
         if q.on_this_map == 0 {
             let msg = if q.filtered > 0 { s.legend_filtered } else { s.legend_elsewhere };
             let (_, h) = r.measure(msg, Font::Small, iw - indent);
@@ -227,6 +271,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
             }
             y += h + gap;
         }
+        // Objectives: ✓ done, ● has markers on this map, ○ no marker here.
         for o in &q.objectives {
             if o.done && !v.show_done {
                 continue;
@@ -238,6 +283,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 r.text(&t, Font::Text, pad + indent, y, iw - indent, c);
             }
             y += h + gap;
+            // Open objective without a marker here: show the website's hint, if any.
             if !o.done && o.markers_here == 0 {
                 if let Some(hint) = &o.hint {
                     let (_, h) = r.measure(hint, Font::Small, iw - 2.0 * indent);
@@ -251,7 +297,8 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         y += 4.0 * sc;
     }
 
-    // 5. Calques (cases à cocher), s'il y en a dans le pack.
+    // 5. Layers (checkboxes), if the pack has any: separator, heading, then one row per layer
+    // with its marker shape and the number of markers on this map.
     if !v.layers.is_empty() {
         y += 2.0 * sc;
         if draw {

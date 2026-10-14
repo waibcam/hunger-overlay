@@ -1,34 +1,43 @@
-//! Recalage visuel : retrouve la position (et au besoin le niveau de zoom) réels de la carte à l'écran, en
-//! comparant la capture à la texture de référence. Filet de sécurité du suivi par les entrées (événement souris
-//! perdu, retour de focus, retour des menus, limite de déplacement non réappliquée au dézoom…).
+//! Visual re-registration: finds the map's actual on-screen position (and, if needed, its zoom level) by
+//! comparing the screen capture with the reference texture. Safety net for the input-based tracking (lost
+//! mouse event, focus regained, return from menus, pan limit not re-applied when zooming out…).
 //!
-//! La texture est très fine (hachures, arbres) : la corrélation chute dès quelques pixels de décalage. On
-//! compare donc des points échantillons de l'écran à la référence interpolée (bilinéaire) à une position
-//! sous-pixel, du grossier au fin : blocs de 16 px (pas 16), puis 8 px (pas 4), puis 4 px (pas 1).
+//! The texture is very fine-grained (hatching, trees): the correlation collapses after just a few pixels of
+//! offset. So we compare sample points from the screen against the reference, interpolated (bilinear) at a
+//! sub-pixel position, from coarse to fine: 16 px blocks (step 16), then 8 px (step 4), then 4 px (step 1).
 
 use crate::capture::Gray;
 
+/// Side of the full reference texture, in pixels.
 const RN: usize = crate::refs::N;
 
-/// Blocs plus sombres que ce seuil = hors carte (fond de l'écran carte, fenêtres masquées).
+/// Blocks darker than this threshold = outside the map (map-screen background, masked windows).
 const DARK: f32 = 55.0;
 
+/// One scale of the pyramid.
 struct Level {
+    /// Block size in screen pixels (4, 8, 16 or 32).
     f: usize,
-    /// Points échantillons : (x, y) écran du centre du bloc, valeur.
+    /// Sample points: screen (x, y) of the block centre, and its value.
     samples: Vec<(f32, f32, f32)>,
 }
 
-/// Capture réduite à plusieurs échelles (blocs de 4, 8, 16 et 32 px), calculée en une seule passe.
+/// Capture reduced to several scales (4, 8, 16 and 32 px blocks), computed in a single pass.
 pub struct Pyramid {
+    /// 4 px blocks (final refinement).
     l4: Level,
+    /// 8 px blocks.
     l8: Level,
+    /// 16 px blocks (local search).
     l16: Level,
+    /// 32 px blocks (exhaustive global search).
     l32: Level,
 }
 
+/// Builds the sample pyramid of a capture. `masked(x, y)` returns true for pixels to ignore
+/// (overlapping UI); blocks that are too dark are dropped as well.
 pub fn pyramid(g: &Gray, masked: &dyn Fn(usize, usize) -> bool) -> Pyramid {
-    // Niveau 4 : moyenne de 4 pixels par bloc 4×4 (pas de 2), le reste en est dérivé.
+    // Level 4: average of 4 pixels per 4×4 block (step of 2); the other levels are derived from it.
     let (w4, h4) = (g.w / 4, g.h / 4);
     let mut g4 = vec![0f32; w4 * h4];
     for j in 0..h4 {
@@ -39,6 +48,8 @@ pub fn pyramid(g: &Gray, masked: &dyn Fn(usize, usize) -> bool) -> Pyramid {
             g4[j * w4 + i] = s as f32 / 4.0;
         }
     }
+    // Level of block size 4·k: average k×k level-4 cells, keep the bright unmasked ones, then thin them
+    // evenly down to about `max_samples` points.
     let mk = |k: usize, max_samples: usize| -> Level {
         let f = 4 * k;
         let (w, h) = (w4 / k, h4 / k);
@@ -62,17 +73,18 @@ pub fn pyramid(g: &Gray, masked: &dyn Fn(usize, usize) -> bool) -> Pyramid {
         let stride = (cand.len() / max_samples).max(1);
         Level { f, samples: cand.into_iter().step_by(stride).collect() }
     };
-    // Peu d'échantillons aux niveaux grossiers (recherches larges), davantage pour l'affinage.
+    // Few samples at the coarse levels (wide searches), more for the refinement.
     Pyramid { l4: mk(1, 3000), l8: mk(2, 1500), l16: mk(4, 600), l32: mk(8, 300) }
 }
 
-/// Référence rééchantillonnée à m×m (moyenne de zone si réduction, bilinéaire sinon).
+/// Reference of map `map` resampled to m×m (area average when shrinking, bilinear otherwise).
 fn ref_at(map: usize, m: usize) -> Vec<f32> {
     let r = crate::refs::full(map);
     let k = RN as f64 / m as f64;
     let mut out = vec![0.0; m * m];
     let p = |x: usize, y: usize| r[y.min(RN - 1) * RN + x.min(RN - 1)] as f32;
     if k > 1.5 {
+        // Shrinking: average up to 8×8 evenly spaced source samples per output pixel.
         let n = (k.ceil() as usize).min(8);
         for j in 0..m {
             for i in 0..m {
@@ -88,6 +100,7 @@ fn ref_at(map: usize, m: usize) -> Vec<f32> {
             }
         }
     } else {
+        // Same size or enlarging: bilinear interpolation at each output pixel centre.
         let rf: Vec<f32> = r.iter().map(|&b| b as f32).collect();
         for j in 0..m {
             for i in 0..m {
@@ -98,6 +111,7 @@ fn ref_at(map: usize, m: usize) -> Vec<f32> {
     out
 }
 
+/// Bilinear sample of the m×m image `img` at sub-pixel position (u, v), clamped to the image edges.
 #[inline]
 fn bilinear(img: &[f32], m: usize, u: f32, v: f32) -> f32 {
     let (x0, y0) = (u.floor().max(0.0) as usize, v.floor().max(0.0) as usize);
@@ -109,13 +123,16 @@ fn bilinear(img: &[f32], m: usize, u: f32, v: f32) -> f32 {
     a * (1.0 - ay) + b * ay
 }
 
-/// NCC entre les points de l'écran et la référence (côté `side` px écran) posée en (tx, ty).
+/// NCC between the screen sample points and the reference (`side` screen px wide) placed with its top-left
+/// corner at (tx, ty). `rf` is the reference resampled to m×m. Returns -1 when too few samples fall on the
+/// reference (fewer than 200, or under 30% of the level's samples) or when either side is uniform.
 fn score(l: &Level, rf: &[f32], m: usize, side: f64, tx: f64, ty: f64) -> f64 {
     let k = (m as f64 / side) as f32;
     let (tx, ty) = (tx as f32, ty as f32);
     let lim = (m - 1) as f32;
     let (mut n, mut sa, mut sb, mut sab, mut saa, mut sbb) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
     for &(x, y, a) in &l.samples {
+        // Screen point -> reference coordinates; skip points that fall outside the map.
         let u = (x - tx) * k - 0.5;
         let v = (y - ty) * k - 0.5;
         if u < 0.0 || v < 0.0 || u > lim || v > lim {
@@ -143,7 +160,7 @@ fn score(l: &Level, rf: &[f32], m: usize, side: f64, tx: f64, ty: f64) -> f64 {
     }
 }
 
-/// Meilleure position autour de (tx, ty) dans ±rad avec un pas `step` (px écran).
+/// Best position around (tx, ty) within ±rad with a step of `step` (screen px), as (score, x, y).
 fn search(l: &Level, rf: &[f32], m: usize, side: f64, tx: f64, ty: f64, rad: f64, step: f64) -> (f64, f64, f64) {
     let mut best = (-2.0, tx, ty);
     let k = (rad / step).round() as i32;
@@ -159,33 +176,42 @@ fn search(l: &Level, rf: &[f32], m: usize, side: f64, tx: f64, ty: f64, rad: f64
     best
 }
 
+/// Result of a re-registration search.
 pub struct Found {
-    /// Coin haut-gauche de la carte entière, en coordonnées client.
+    /// Top-left corner of the whole map, in client coordinates (x).
     pub x0: f64,
+    /// Top-left corner of the whole map, in client coordinates (y).
     pub y0: f64,
+    /// Zoom level found (0 = default view; each level adds half of the default side).
     pub n: i32,
+    /// Correlation score at the position found.
     pub score: f64,
-    /// Score à la position prédite (pour décider s'il faut corriger).
+    /// Score at the predicted position (used to decide whether a correction is needed).
     pub score_pred: f64,
 }
 
-/// `pred` = coin haut-gauche prédit (client) au niveau `n_pred` ; `side0` = côté en vue par défaut ;
-/// `zooms` = niveaux candidats ; `radius` = rayon de recherche (px écran).
+/// Local search around the prediction.
+/// `pred` = predicted top-left corner (client) at level `n_pred`; `side0` = map side in the default view;
+/// `zooms` = candidate levels; `radius` = search radius (screen px).
 pub fn locate(p: &Pyramid, map: usize, side0: f64, pred: (f64, f64), n_pred: i32, zooms: &[i32], radius: f64) -> Option<Found> {
     let (l16, l8, l4) = (&p.l16, &p.l8, &p.l4);
     if l4.samples.len() < 400 {
         return None;
     }
+    // On-screen map side at zoom level n.
     let side_of = |n: i32| (1.0 + 0.5 * n as f64) * side0;
+    // Reference resampled so that one reference pixel matches one block of level `l`.
     let refs = |l: &Level, n: i32| {
         let m = ((side_of(n) / l.f as f64).round() as usize).max(8);
         (ref_at(map, m), m)
     };
+    // Score of the current prediction, at the finest level.
     let (r4p, m4p) = refs(l4, n_pred);
     let score_pred = score(l4, &r4p, m4p, side_of(n_pred), pred.0, pred.1);
-    // Le zoom se fait autour du centre (déplacé) de la carte : à un autre niveau, le coin prédit change.
+    // Zooming happens around the (panned) centre of the map: at another level, the predicted corner changes.
     let (cx, cy) = (pred.0 + side_of(n_pred) / 2.0, pred.1 + side_of(n_pred) / 2.0);
     let mut best: Option<(f64, i32, f64, f64)> = None;
+    // 1) Each candidate zoom level: coarse 16 px search within `radius`; keep the best level.
     for &n in zooms {
         let (rf, m) = refs(l16, n);
         let (px, py) = (cx - side_of(n) / 2.0, cy - side_of(n) / 2.0);
@@ -196,6 +222,7 @@ pub fn locate(p: &Pyramid, map: usize, side0: f64, pred: (f64, f64), n_pred: i32
     }
     let (_, n, x, y) = best?;
     let side = side_of(n);
+    // 2) Refine at that level: 8 px blocks (±24, step 4), then 4 px blocks (±6, step 1).
     let (rf, m) = refs(l8, n);
     let (_, x, y) = search(l8, &rf, m, side, x, y, 24.0, 4.0);
     let (rf, m) = refs(l4, n);
@@ -203,20 +230,23 @@ pub fn locate(p: &Pyramid, map: usize, side0: f64, pred: (f64, f64), n_pred: i32
     Some(Found { x0, y0, n, score, score_pred })
 }
 
-/// Recherche « de zéro » : tous les niveaux de zoom, toutes les positions possibles, quand l'état est perdu
-/// (appli lancée carte déjà zoomée, retour des menus…). `center` = centre de l'écran carte (vue par défaut).
+/// "From scratch" search: every zoom level, every possible position, used when the state is lost
+/// (app started with the map already zoomed in, return from menus…). `center` = centre of the map screen
+/// (default view).
 pub fn locate_global(p: &Pyramid, map: usize, side0: f64, center: (f64, f64)) -> Option<Found> {
     if p.l4.samples.len() < 400 || p.l32.samples.len() < 60 {
         return None;
     }
+    // On-screen map side at zoom level n.
     let side_of = |n: i32| (1.0 + 0.5 * n as f64) * side0;
-    // 1) Niveau 32 px : balayage complet, on garde les 4 meilleurs candidats.
+    // 1) 32 px level: full sweep over zoom levels 0..=10, keeping positions scoring above 0.3; the 4 best
+    //    candidates are refined below.
     let mut cands: Vec<(f64, i32, f64, f64)> = vec![];
     for n in 0..=10 {
         let side = side_of(n);
         let m = ((side / 32.0).round() as usize).max(8);
         let rf = ref_at(map, m);
-        // Décalage possible : jusqu'à un demi-côté (+ marge : la limite n'est pas réappliquée au dézoom).
+        // Possible offset: up to half a side (+ margin: the pan limit is not re-applied when zooming out).
         let reach = side / 2.0 + 0.3 * side0;
         let (px, py) = (center.0 - side / 2.0, center.1 - side / 2.0);
         let k = (reach / 32.0).ceil() as i32;
@@ -231,7 +261,7 @@ pub fn locate_global(p: &Pyramid, map: usize, side0: f64, center: (f64, f64)) ->
         }
     }
     cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    // 2) Affinage des meilleurs candidats (16 → 8 → 4 px) ; on garde le meilleur score final.
+    // 2) Refine the best candidates (16 → 8 → 4 px); keep the best final score.
     let mut best: Option<Found> = None;
     for &(_, n, x, y) in cands.iter().take(4) {
         let side = side_of(n);
@@ -249,57 +279,75 @@ pub fn locate_global(p: &Pyramid, map: usize, side0: f64, center: (f64, f64)) ->
     best
 }
 
-/// Type de recherche demandée au fil de calcul.
+/// Kind of search requested from the worker thread.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
-    /// Autour de la position prédite.
+    /// Around the predicted position.
     Local,
-    /// Autour de la prédiction, puis recherche complète si rien n'est trouvé.
+    /// Around the prediction, then a full search if nothing good is found (score below 0.6).
     LocalThenGlobal,
-    /// Recherche complète uniquement (état perdu).
+    /// Full search only (state lost).
     Global,
 }
 
+/// A re-registration request sent to the worker thread.
 pub struct Job {
+    /// Request id, echoed in the result so stale answers can be recognised.
     pub id: u64,
+    /// Grayscale capture of the game window's client area.
     pub g: Gray,
-    /// Zones à ignorer (panneau d'aide du jeu, notre panneau), coordonnées client.
+    /// Areas to ignore (the game's help panel, our own panel) as (left, top, right, bottom), client coordinates.
     pub masks: Vec<(f64, f64, f64, f64)>,
+    /// Index of the map believed to be shown (in refs::NAMES).
     pub map: usize,
+    /// Map side in the default view, in client px.
     pub side0: f64,
-    /// Centre de la carte en vue par défaut.
+    /// Centre of the map in the default view.
     pub center: (f64, f64),
+    /// Predicted top-left corner of the map (client coordinates).
     pub pred: (f64, f64),
+    /// Predicted zoom level.
     pub n_pred: i32,
+    /// Zoom levels to try in the local search.
     pub zooms: Vec<i32>,
+    /// Local search radius, in screen px.
     pub radius: f64,
+    /// Which search to run.
     pub kind: Kind,
 }
 
+/// Result of a `Job`.
 pub struct Res {
+    /// Id of the job this answers.
     pub id: u64,
-    /// Carte reconnue (une recherche complète essaie aussi les autres cartes).
+    /// Recognised map (a full search also tries the other maps).
     pub map: usize,
+    /// Position found, if any.
     pub found: Option<Found>,
+    /// True if a full (global) search was run.
     pub global_used: bool,
+    /// Computation time in milliseconds.
     pub ms: u128,
 }
 
+/// Shared slot where the worker drops its latest result.
 pub type ResSlot = std::sync::Arc<std::sync::Mutex<Option<Res>>>;
 
-/// Lance le fil de calcul des recalages (l'affichage n'est jamais bloqué par une recherche).
+/// Starts the re-registration worker thread (the display is never blocked by a search).
+/// `notify` is called after each result is stored, e.g. to wake the UI thread.
 pub fn spawn_worker(notify: Box<dyn Fn() + Send>) -> (std::sync::mpsc::Sender<Job>, ResSlot) {
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
     let slot: ResSlot = Default::default();
     let out = slot.clone();
     std::thread::spawn(move || {
         while let Ok(mut job) = rx.recv() {
-            // On ne traite que la demande la plus récente.
+            // Only the most recent request is processed.
             while let Ok(newer) = rx.try_recv() {
                 job = newer;
             }
             let t0 = std::time::Instant::now();
             let masks = job.masks.clone();
+            // A pixel is ignored if it lies inside any mask rectangle.
             let masked = move |x: usize, y: usize| {
                 let (fx, fy) = (x as f64, y as f64);
                 masks.iter().any(|&(l, t, r, b)| fx >= l && fx <= r && fy >= t && fy <= b)
@@ -311,9 +359,11 @@ pub fn spawn_worker(notify: Box<dyn Fn() + Send>) -> (std::sync::mpsc::Sender<Jo
             if job.kind != Kind::Global {
                 found = locate(&p, job.map, job.side0, job.pred, job.n_pred, &job.zooms, job.radius);
             }
+            // Below 0.6 the local result is not trusted.
             let weak = found.as_ref().map(|f| f.score < 0.6).unwrap_or(true);
             if job.kind == Kind::Global {
-                // Carte perdue : la dernière connue d'abord, puis les autres (on a pu changer de raid).
+                // Map lost: try the last known one first, then the others (the player may have changed raid).
+                // Stops as soon as a score of 0.6 or more is reached.
                 for mi in std::iter::once(job.map).chain((0..crate::refs::NAMES.len()).filter(|&i| i != job.map)) {
                     if let Some(gf) = locate_global(&p, mi, job.side0, job.center) {
                         global_used = true;
@@ -327,6 +377,7 @@ pub fn spawn_worker(notify: Box<dyn Fn() + Send>) -> (std::sync::mpsc::Sender<Jo
                     }
                 }
             } else if job.kind == Kind::LocalThenGlobal && weak {
+                // Weak local result: run a full search on the same map, keeping the prediction's score.
                 if let Some(gf) = locate_global(&p, job.map, job.side0, job.center) {
                     global_used = true;
                     let sp = found.as_ref().map(|f| f.score_pred).unwrap_or(-1.0);
@@ -344,16 +395,19 @@ pub fn spawn_worker(notify: Box<dyn Fn() + Send>) -> (std::sync::mpsc::Sender<Jo
 
 #[cfg(test)]
 mod tests {
-    //! Validation hors ligne sur des captures réelles dont la position est connue (recalage SIFT).
-    //! `HUNGER_RAWCAPS=<dossier> cargo test --release -- --nocapture` (cases.txt + *.gray).
+    //! Offline validation on real captures whose position is known (SIFT registration).
+    //! `HUNGER_RAWCAPS=<folder> cargo test --release -- --nocapture` (cases.txt + *.gray).
     use super::*;
 
+    /// For each capture: identification (default view only), full search, and recovery from a wrong
+    /// prediction. Skipped when HUNGER_RAWCAPS is not set.
     #[test]
     fn real_captures() {
         let Ok(dir) = std::env::var("HUNGER_RAWCAPS") else { return };
         let cases = std::fs::read_to_string(format!("{dir}/cases.txt")).unwrap();
         let (side0, center) = (1366.0, (596.92 + 683.0, 36.92 + 683.0));
         for line in cases.lines() {
+            // Line format: name MapNN zoom_level true_x0 true_y0 width height
             let v: Vec<&str> = line.split_whitespace().collect();
             let (name, map, n): (&str, usize, i32) = (v[0], v[1][3..].parse::<usize>().unwrap() - 1, v[2].parse().unwrap());
             let (tx, ty): (f64, f64) = (v[3].parse().unwrap(), v[4].parse().unwrap());
@@ -361,19 +415,19 @@ mod tests {
             let g = Gray { w, h, px: std::fs::read(format!("{dir}/{name}.gray")).unwrap() };
             let masked = |_: usize, _: usize| false;
             if n == 0 {
-                // Vue par défaut : identification de la carte avec la vignette dérivée de la référence 4 bits.
-                let sq = crate::detect::find_square(&g).expect("carré");
+                // Default view: identify the map with the thumbnail derived from the 4-bit reference.
+                let sq = crate::detect::find_square(&g).expect("square");
                 let id = crate::detect::identify(&g, &sq).expect("identification");
-                println!("{name:7} identification : {} score {:.3} marge {:.3}", crate::refs::NAMES[id.0], id.1, id.2);
+                println!("{name:7} identification: {} score {:.3} margin {:.3}", crate::refs::NAMES[id.0], id.1, id.2);
             }
             let t0 = std::time::Instant::now();
             let p = pyramid(&g, &masked);
             let tp = t0.elapsed().as_millis();
-            // 1) Recherche complète.
+            // 1) Full search.
             let t1 = std::time::Instant::now();
             let gf = locate_global(&p, map, side0, center);
             let tg = t1.elapsed().as_millis();
-            // 2) Recalage après mouvement avec un zoom faux de 2 crans et une position décalée de 150 px.
+            // 2) Re-registration after movement, with a zoom wrong by 2 steps and a position offset by 150 px.
             let side_of = |k: i32| (1.0 + 0.5 * k as f64) * side0;
             let wrong = (n - 2).max(0);
             let (cx, cy) = (tx + side_of(n) / 2.0 + 150.0, ty + side_of(n) / 2.0 - 120.0);
@@ -384,9 +438,9 @@ mod tests {
             let tm = t2.elapsed().as_millis();
             let fmt = |f: &Option<Found>| match f {
                 Some(f) => format!("n={} err=({:+.1},{:+.1}) score={:.3}", f.n, f.x0 - tx, f.y0 - ty, f.score),
-                None => "ÉCHEC".into(),
+                None => "FAILED".into(),
             };
-            println!("{name:7} vrai n={n:2} | pyramide {tp:3} ms | complète {tg:4} ms : {} | après mouvement (n faux {wrong}) {tm:3} ms : {}", fmt(&gf), fmt(&mf));
+            println!("{name:7} true n={n:2} | pyramid {tp:3} ms | full {tg:4} ms: {} | after movement (wrong n {wrong}) {tm:3} ms: {}", fmt(&gf), fmt(&mf));
         }
     }
 }

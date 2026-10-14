@@ -1,25 +1,34 @@
-//! Détection visuelle de la carte du jeu (mesures : docs/overlay/MAP_UI_MEASUREMENTS.md).
+//! Visual detection of the game's map screen (measurements: docs/overlay/MAP_UI_MEASUREMENTS.md).
 //!
-//! - À l'ouverture, la carte est TOUJOURS en vue par défaut : un carré de parchemin clair, centré, sur fond sombre.
-//! - Ce carré est la texture ENTIÈRE de la carte → on l'identifie en comparant une vignette 128×128 aux 3 références.
-//! - Le panneau d'aide en bas à gauche (« Pan Around / Adjust Zoom / CLOSE ») reste affiché tant que la carte est
-//!   ouverte : sa signature sert à détecter la fermeture.
+//! - When opened, the map is ALWAYS in its default view: a light parchment square, centred, on a dark background.
+//! - That square is the map's ENTIRE texture → we identify the map by comparing a 128×128 thumbnail with the
+//!   3 references.
+//! - The help panel at the bottom left ("Pan Around / Adjust Zoom / CLOSE") stays visible as long as the map is
+//!   open: its signature is used to detect when the map closes.
 
 use crate::capture::Gray;
 
+/// Side of the identification thumbnail (same as the reference thumbnails).
 pub const REF_N: usize = crate::refs::THUMB;
 
+/// Luminance above which a pixel counts as "parchment" (the background around the map is much darker).
 const BRIGHT: u8 = 150;
 
+/// The default-view parchment square, in the coordinates of the captured image.
 #[derive(Debug, Clone, Copy)]
 pub struct Square {
+    /// Left edge.
     pub x0: f64,
+    /// Top edge.
     pub y0: f64,
+    /// Side length (average of the measured width and height).
     pub side: f64,
 }
 
+/// Longest run of consecutive `true` values, as an inclusive (first, last) index pair.
 fn longest_run(flags: &[bool]) -> Option<(usize, usize)> {
     let (mut best, mut start) = (None::<(usize, usize)>, None);
+    // A trailing `false` closes a run that reaches the end of the slice.
     for (i, &f) in flags.iter().chain(std::iter::once(&false)).enumerate() {
         match (f, start) {
             (true, None) => start = Some(i),
@@ -35,23 +44,27 @@ fn longest_run(flags: &[bool]) -> Option<(usize, usize)> {
     best
 }
 
-/// Cherche le carré de parchemin (vue par défaut). Renvoie None si la carte n'est pas affichée.
+/// Looks for the parchment square (default view). Returns None if the map is not displayed.
 pub fn find_square(g: &Gray) -> Option<Square> {
+    // Coarse pass on a grid sampled every S pixels.
     const S: usize = 4;
     let (cw, ch) = (g.w / S, g.h / S);
     if cw < 32 || ch < 32 {
         return None;
     }
+    // Rows where more than 30% of the samples are bright; the longest run of them gives the vertical extent.
     let row_flags: Vec<bool> = (0..ch)
         .map(|r| (0..cw).filter(|&c| g.at(c * S, r * S) > BRIGHT).count() as f64 / cw as f64 > 0.3)
         .collect();
     let (r0, r1) = longest_run(&row_flags)?;
+    // Same for columns, counted only within that vertical extent.
     let col_flags: Vec<bool> = (0..cw)
         .map(|c| (r0..=r1).filter(|&r| g.at(c * S, r * S) > BRIGHT).count() as f64 / (r1 - r0 + 1) as f64 > 0.3)
         .collect();
     let (c0, c1) = longest_run(&col_flags)?;
     let (cx0, cx1, cy0, cy1) = (c0 * S, c1 * S, r0 * S, r1 * S);
-    // Affinage à pleine résolution : bord = première/dernière ligne majoritairement claire.
+    // Full-resolution refinement: edge = first/last line that is mostly (> 50%) bright, measured over the
+    // middle half of the square and searched within ±8 px of the coarse edge.
     let mid_rows: Vec<usize> = (cy0 + (cy1 - cy0) / 4..cy0 + 3 * (cy1 - cy0) / 4).step_by(2).collect();
     let mid_cols: Vec<usize> = (cx0 + (cx1 - cx0) / 4..cx0 + 3 * (cx1 - cx0) / 4).step_by(2).collect();
     let col_frac = |x: usize| mid_rows.iter().filter(|&&y| g.at(x, y) > BRIGHT).count() as f64 / mid_rows.len().max(1) as f64;
@@ -66,14 +79,17 @@ pub fn find_square(g: &Gray) -> Option<Square> {
     let (by0, by1) = span(cy1, cy1 + S, g.h);
     let y1 = (by0..=by1).rev().find(|&y| row_frac(y) > 0.5)?;
     let (w, h) = ((x1 - x0 + 1) as f64, (y1 - y0 + 1) as f64);
+    // Sanity check: the default view is at least half the capture height tall and is square
+    // (width and height agree within 1% or 4 px, whichever is larger).
     if h < 0.5 * g.h as f64 || (w - h).abs() > (0.01 * w).max(4.0) {
         return None;
     }
     Some(Square { x0: x0 as f64, y0: y0 as f64, side: (w + h) / 2.0 })
 }
 
-/// Vignette 128×128 (moyenne par blocs) du carré détecté.
+/// 128×128 thumbnail (block averages) of the detected square.
 fn thumb(g: &Gray, sq: &Square) -> Vec<f64> {
+    // Each thumbnail cell averages up to 6×6 evenly spaced samples of its screen block.
     let mut out = vec![0.0; REF_N * REF_N];
     let cell = sq.side / REF_N as f64;
     for j in 0..REF_N {
@@ -97,6 +113,8 @@ fn thumb(g: &Gray, sq: &Square) -> Vec<f64> {
     out
 }
 
+/// Normalised cross-correlation (-1..1) between a thumbnail and a reference of the same length.
+/// Insensitive to overall brightness and contrast; 0 if either side is uniform.
 fn ncc(a: &[f64], b: &[u8]) -> f64 {
     let n = a.len() as f64;
     let ma = a.iter().sum::<f64>() / n;
@@ -115,7 +133,8 @@ fn ncc(a: &[f64], b: &[u8]) -> f64 {
     }
 }
 
-/// Identifie la carte : (index dans refs::NAMES, score, écart avec la 2e). None si trop incertain.
+/// Identifies the map: (index in refs::NAMES, score, margin over the runner-up). None if too uncertain,
+/// i.e. unless the best score exceeds 0.5 and beats the second-best by more than 0.1.
 pub fn identify(g: &Gray, sq: &Square) -> Option<(usize, f64, f64)> {
     let t = thumb(g, sq);
     let mut scores: Vec<(usize, f64)> = (0..crate::refs::NAMES.len()).map(|i| (i, ncc(&t, crate::refs::thumb(i)))).collect();
@@ -129,12 +148,14 @@ pub fn identify(g: &Gray, sq: &Square) -> Option<(usize, f64, f64)> {
     }
 }
 
-/// Zone du panneau d'aide (coordonnées client), proportionnelle à la hauteur et ancrée en bas à gauche.
+/// Area of the help panel (client coordinates) as (left, top, right, bottom), proportional to the window
+/// height and anchored at the bottom left.
 pub fn panel_rect(h: f64) -> (f64, f64, f64, f64) {
     (0.034 * h, h - 0.202 * h, 0.269 * h, h - 0.035 * h)
 }
 
-/// Corrélation normalisée entre deux images de même taille (sous-échantillonnées d'un facteur 2).
+/// Normalised correlation between two images of the same size (subsampled by a factor of 2).
+/// Returns 0 if the sizes differ, the images are tiny, or either one is uniform.
 pub fn gray_ncc(a: &Gray, b: &Gray) -> f64 {
     if a.w != b.w || a.h != b.h || a.w < 4 || a.h < 4 {
         return 0.0;
@@ -161,35 +182,43 @@ pub fn gray_ncc(a: &Gray, b: &Gray) -> f64 {
     }
 }
 
-/// Signature du panneau d'aide : l'image de sa zone, comparée par corrélation (robuste au survol du
-/// bouton CLOSE, mais distingue le panneau d'autres écrans sombres comme le Compendium).
+/// Signature of the help panel: the image of its area, compared by correlation (robust to the CLOSE button
+/// being hovered, yet it tells the panel apart from other dark screens such as the Compendium).
 #[derive(Clone)]
 pub struct PanelSig {
+    /// Screen x of the captured area.
     x: i32,
+    /// Screen y of the captured area.
     y: i32,
+    /// Grayscale snapshot of the panel area.
     img: Gray,
 }
 
 impl PanelSig {
+    /// Builds a signature from a capture of the panel area taken at screen position (x, y).
+    /// Rejected (None) if the area is nearly uniform (luminance standard deviation below 15).
     pub fn from(g: Gray, x: i32, y: i32) -> Option<PanelSig> {
         let n = g.px.len() as f64;
         let m = g.px.iter().map(|&v| v as f64).sum::<f64>() / n;
         let sd = (g.px.iter().map(|&v| (v as f64 - m).powi(2)).sum::<f64>() / n).sqrt();
         if sd < 15.0 {
-            return None; // zone uniforme : pas un panneau
+            return None; // uniform area: not a panel
         }
         Some(PanelSig { x, y, img: g })
     }
 
+    /// Screen rectangle to re-capture for comparison, as (x, y, w, h).
     pub fn rect(&self) -> (i32, i32, i32, i32) {
         (self.x, self.y, self.img.w as i32, self.img.h as i32)
     }
 
+    /// Correlation between the stored panel and a fresh capture of the same rectangle.
     pub fn score(&self, g: &Gray) -> f64 {
         gray_ncc(&self.img, g)
     }
 
-    /// Sérialisation simple (pour retrouver la carte au lancement suivant).
+    /// Simple serialisation (to recognise the map again on the next launch): x, y, w, h as little-endian
+    /// i32, followed by the raw pixels.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(16 + self.img.px.len());
         for n in [self.x, self.y, self.img.w as i32, self.img.h as i32] {
@@ -199,6 +228,7 @@ impl PanelSig {
         v
     }
 
+    /// Inverse of `to_bytes`. None if the data is truncated.
     pub fn from_bytes(b: &[u8]) -> Option<PanelSig> {
         let rd = |i: usize| Some(i32::from_le_bytes(b.get(i * 4..i * 4 + 4)?.try_into().ok()?));
         let (x, y, w, h) = (rd(0)?, rd(1)?, rd(2)? as usize, rd(3)? as usize);
@@ -207,14 +237,15 @@ impl PanelSig {
     }
 }
 
-/// Sonde très légère : une ligne horizontale et une colonne au centre de l'écran. Vraie si on voit un carré
-/// clair centré sur fond sombre (vue par défaut de la carte). Coût : 2 petites captures.
+/// Very cheap probe: one horizontal line and one column through the centre of the screen. True if we see a
+/// light square centred on a dark background (the map's default view). Cost: 2 small captures.
 pub fn probe(x: i32, y: i32, w: i32, h: i32) -> bool {
     let (Some(row), Some(col)) = (crate::capture::grab_gray(x, y + h / 2, w, 1), crate::capture::grab_gray(x + w / 2, y, 1, h)) else {
         return false;
     };
     let (wf, hf) = (w as f64, h as f64);
-    let half = 0.474 * hf; // demi-côté attendu du carré (mesuré : 683/1440)
+    let half = 0.474 * hf; // expected half-side of the square (measured: 683/1440)
+    // Fraction of pixels in v[a..b] matching `f` (None if the span is too short to judge).
     let frac = |v: &[u8], a: f64, b: f64, f: &dyn Fn(u8) -> bool| -> Option<f64> {
         let (a, b) = (a.max(0.0) as usize, (b.min(v.len() as f64)) as usize);
         if b <= a + 4 {
@@ -225,14 +256,14 @@ pub fn probe(x: i32, y: i32, w: i32, h: i32) -> bool {
     let bright = |p: u8| p > BRIGHT;
     let dark = |p: u8| p < 70;
     let cx = wf / 2.0;
-    // Bande centrale claire (horizontale et verticale).
+    // Light central band (horizontal and vertical): at least 50% bright pixels.
     if frac(&row.px, cx - 0.3 * hf, cx + 0.3 * hf, &bright).unwrap_or(0.0) < 0.5 {
         return false;
     }
     if frac(&col.px, 0.2 * hf, 0.8 * hf, &bright).unwrap_or(0.0) < 0.5 {
         return false;
     }
-    // Marges latérales sombres, si l'écran est assez large pour en avoir.
+    // Dark side margins (at least 85% dark pixels), if the screen is wide enough to have them.
     let margin = cx - half - 0.01 * wf;
     if margin > 0.03 * wf {
         for (a, b) in [(0.01 * wf, margin), (wf - margin, 0.99 * wf)] {
