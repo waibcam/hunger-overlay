@@ -42,6 +42,34 @@ pub struct Marker {
     pub py: Option<f64>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Chance (0..1) que le conteneur contienne l'objet, si le site la fournit.
+    #[serde(default)]
+    pub chance: Option<f64>,
+}
+
+impl Marker {
+    /// Chance du point : champ `chance`, sinon lue dans le libellé (« 1/4.7 » ou « 34% »).
+    pub fn chance(&self) -> Option<f64> {
+        if let Some(c) = self.chance {
+            return Some(if c > 1.0 { c / 100.0 } else { c });
+        }
+        let l = self.label.as_deref()?;
+        if let Some(i) = l.find("1/") {
+            let num: String = l[i + 2..].chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
+            if let Ok(v) = num.replace(',', ".").parse::<f64>() {
+                if v > 0.0 {
+                    return Some(1.0 / v);
+                }
+            }
+        }
+        if let Some(p) = l.find('%') {
+            let head: String = l[..p].trim_end().chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect::<Vec<_>>().into_iter().rev().collect();
+            if let Ok(v) = head.replace(',', ".").parse::<f64>() {
+                return Some(v / 100.0);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +107,8 @@ pub struct PackQuest {
 pub struct Pack {
     #[serde(default)]
     pub schema: u32,
+    #[serde(default)]
+    pub locale: String,
     pub pack_version: String,
     #[serde(default)]
     pub maps: Vec<PackMap>,
@@ -118,6 +148,9 @@ pub struct Tracker {
     pub pack_version: String,
     #[serde(default)]
     pub rev: Option<String>,
+    /// Langue du compte sur le site (si le site l'envoie).
+    #[serde(default)]
+    pub locale: Option<String>,
     #[serde(default)]
     pub tracked: Vec<TrackedQuest>,
 }
@@ -166,7 +199,7 @@ pub struct LegendObjective {
 }
 
 /// Construit les points et la légende pour une carte donnée à partir du pack et du tracker.
-pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool, hidden: &[String]) -> (Vec<DrawPoint>, Vec<LegendQuest>) {
+pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool, hidden: &[String], min_chance: f64) -> (Vec<DrawPoint>, Vec<LegendQuest>) {
     let mut pts = Vec::new();
     let mut legend = Vec::new();
     let Some(pm) = pack.maps.iter().find(|m| m.map_id == map_id) else {
@@ -199,7 +232,8 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
             let oi = lq.objectives.len();
             let mut here = 0;
             if !done || show_done {
-                for mk in po.markers.iter().filter(|m| m.map == map_id) {
+                // Filtre « chance minimum » : seulement pour les points dont la chance est connue (loot).
+                for mk in po.markers.iter().filter(|m| m.map == map_id && m.chance().map(|c| c + 1e-9 >= min_chance).unwrap_or(true)) {
                     if let Some((u, v)) = to_uv(mk) {
                         here += 1;
                         pts.push(DrawPoint {

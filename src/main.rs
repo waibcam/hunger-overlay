@@ -207,7 +207,7 @@ impl App {
         let _ = self.net.send(Req::Configure {
             key: self.cfg.api_key(),
             base_url: self.cfg.base_url.clone(),
-            locale: i18n::pack_locale(&self.cfg.locale),
+            locale: self.cfg.locale.clone(),
         });
     }
 
@@ -590,6 +590,13 @@ impl App {
 
     /// Reconstruit les points de la carte ouverte quand les données changent.
     fn sync_data(&mut self) {
+        // Langue de l'interface : forcée, sinon celle du compte du site, sinon Windows (anglais par défaut).
+        let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
+        let s = i18n::strings_for(&i18n::effective(&self.cfg.locale, account.as_deref()));
+        if !std::ptr::eq(s, self.s) {
+            self.s = s;
+            self.dirty = true;
+        }
         let sh = self.shared.lock().unwrap();
         let st = sh.status.clone();
         if st != self.last_status {
@@ -617,7 +624,7 @@ impl App {
         }
         m.data_version = sh.version;
         if let (Some(p), Some(t)) = (&sh.pack, &sh.tracker) {
-            let (pts, legend) = model::build_view(p, t, m.map_id, self.cfg.show_done, &self.cfg.hidden_quests);
+            let (pts, legend) = model::build_view(p, t, m.map_id, self.cfg.show_done, &self.cfg.hidden_quests, self.cfg.min_chance as f64 / 100.0);
             m.points = pts;
             m.legend = legend;
         } else {
@@ -785,11 +792,27 @@ impl App {
         }
         self.shared.lock().unwrap().validate = None;
         let key = self.cfg.api_key().unwrap_or_default();
-        self.settings = settings::Settings::open(self.s, &key, self.cfg.map_vk, self.cfg.show_done, self.cfg.capture_visible, self.cfg.autostart);
+        self.settings = settings::Settings::open(
+            self.s,
+            settings::Init {
+                key: &key,
+                vk: self.cfg.map_vk,
+                show_done: self.cfg.show_done,
+                capture: self.cfg.capture_visible,
+                autostart: self.cfg.autostart,
+                locale: &self.cfg.locale,
+                min_chance: self.cfg.min_chance,
+            },
+        );
     }
 
     fn settings_command(&mut self, id: i32) {
         match id {
+            settings::ID_CHANCE => {
+                if let Some(s) = &self.settings {
+                    s.chance_moved();
+                }
+            }
             settings::ID_KEY_SHOW => {
                 if let Some(s) = self.settings.as_mut() {
                     s.toggle_mask();
@@ -804,19 +827,32 @@ impl App {
             settings::ID_TEST => {
                 if let Some(s) = &self.settings {
                     let k = s.key_text();
+                    if !net::key_format_ok(&k) {
+                        s.set_status(self.s.st_bad_format);
+                        return;
+                    }
                     s.set_status(self.s.st_testing);
                     self.shared.lock().unwrap().validate = None;
-                    let _ = self.net.send(Req::Configure { key: self.cfg.api_key(), base_url: self.cfg.base_url.clone(), locale: i18n::pack_locale(&self.cfg.locale) });
+                    let _ = self.net.send(Req::Configure { key: self.cfg.api_key(), base_url: self.cfg.base_url.clone(), locale: self.cfg.locale.clone() });
                     let _ = self.net.send(Req::Validate(k));
                 }
             }
             settings::ID_SAVE => {
+                if let Some(s) = &self.settings {
+                    let k = s.key_text();
+                    if !k.is_empty() && !net::key_format_ok(&k) {
+                        s.set_status(self.s.st_bad_format);
+                        return;
+                    }
+                }
                 if let Some(s) = self.settings.take() {
                     let v = s.values();
                     self.cfg.set_api_key(&v.key);
                     self.cfg.map_vk = v.vk;
                     self.cfg.show_done = v.show_done;
                     self.cfg.capture_visible = v.capture_visible;
+                    self.cfg.locale = v.locale;
+                    self.cfg.min_chance = v.min_chance;
                     if v.autostart != self.cfg.autostart {
                         config::set_autostart(v.autostart);
                     }

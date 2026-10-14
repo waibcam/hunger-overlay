@@ -29,6 +29,10 @@ pub struct Strings {
     pub st_rate: &'static str,
     pub st_testing: &'static str,
     pub st_valid: &'static str,
+    pub st_bad_format: &'static str,
+    pub language: &'static str,
+    pub language_auto: &'static str,
+    pub min_chance: &'static str,
     pub already_running: &'static str,
     pub update_available: &'static str,
 }
@@ -60,6 +64,10 @@ pub static FR: Strings = Strings {
     st_rate: "trop de requêtes, nouvelle tentative plus tard",
     st_testing: "Test en cours…",
     st_valid: "Clé valide — compte :",
+    language: "Langue :",
+    language_auto: "Automatique (langue du compte sur le site)",
+    min_chance: "Points de ramassage : chance minimum",
+    st_bad_format: "✖ Ce n'est pas une clé : elle commence par « hco_ » et fait 36 caractères.",
     already_running: "Hunger Overlay est déjà lancé (icône près de l'horloge).",
     update_available: "Une nouvelle version de Hunger Overlay est disponible.",
 };
@@ -91,20 +99,54 @@ pub static EN: Strings = Strings {
     st_rate: "too many requests, will retry later",
     st_testing: "Testing…",
     st_valid: "Valid key — account:",
+    language: "Language:",
+    language_auto: "Automatic (your site account language)",
+    min_chance: "Loot points: minimum chance",
+    st_bad_format: "✖ Not a key: it starts with \"hco_\" and is 36 characters long.",
     already_running: "Hunger Overlay is already running (icon near the clock).",
     update_available: "A new version of Hunger Overlay is available.",
 };
 
-pub fn is_french() -> bool {
-    unsafe { (GetUserDefaultUILanguage() & 0x3ff) == 0x0c }
-}
+/// Langues du site (code, nom affiché).
+pub static LANGS: [(&str, &str); 10] = [
+    ("en", "English"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("it", "Italiano"),
+    ("pt", "Português"),
+    ("ru", "Русский"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("zh", "中文"),
+];
 
-pub fn t() -> &'static Strings {
-    if is_french() {
+/// Textes de l'interface : français si la langue effective est le français, anglais sinon.
+pub fn strings_for(lang: &str) -> &'static Strings {
+    if lang.starts_with("fr") {
         &FR
     } else {
         &EN
     }
+}
+
+/// Langue effective : forcée, sinon celle du compte du site, sinon celle de Windows (anglais par défaut).
+pub fn effective(forced: &str, account: Option<&str>) -> String {
+    if !forced.is_empty() {
+        return forced.to_lowercase();
+    }
+    if let Some(a) = account {
+        let a = a.to_lowercase();
+        let a = a.split(['-', '_']).next().unwrap_or("").to_string();
+        if LANGS.iter().any(|(c, _)| *c == a) {
+            return a;
+        }
+    }
+    pack_locale("")
+}
+
+pub fn t() -> &'static Strings {
+    strings_for(&pack_locale(""))
 }
 
 /// Locale du pack : réglage forcé, sinon langue de Windows (code ISO à 2 lettres).

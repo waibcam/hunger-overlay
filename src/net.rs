@@ -26,6 +26,7 @@ pub enum Req {
     /// Rafraîchir le tracker (ouverture de carte ; `force` = demande manuelle, ignore l'intervalle de 30 s mais pas le plafond horaire).
     Refresh { force: bool },
     /// Nouvelle configuration (clé / URL / langue).
+    /// `locale` = langue forcée (vide = automatique : compte du site, sinon Windows).
     Configure { key: Option<String>, base_url: String, locale: String },
     /// Tester une clé depuis les paramètres, sans la conserver.
     Validate(String),
@@ -62,6 +63,9 @@ struct Worker {
     agent: ureq::Agent,
     key: Option<String>,
     base: String,
+    /// Langue forcée (vide = automatique).
+    forced: String,
+    /// Langue du pack actuellement en cache.
     locale: String,
     etags: Etags,
     history: Vec<Instant>,
@@ -89,7 +93,8 @@ pub fn spawn(shared: SharedRef, notify: Box<dyn Fn() + Send>) -> Sender<Req> {
             agent,
             key: None,
             base: String::new(),
-            locale: "en".into(),
+            forced: String::new(),
+            locale: String::new(),
             etags: Default::default(),
             history: vec![],
             last: None,
@@ -122,10 +127,17 @@ impl Worker {
             self.etags.tracker = None;
         }
         logf!("cache : pack={} tracker={}", pack.as_ref().map(|p| p.pack_version.as_str()).unwrap_or("-"), tracker.is_some());
+        self.locale = pack.as_ref().map(|p| p.locale.clone()).unwrap_or_default();
         let mut s = self.shared.lock().unwrap();
         s.pack = pack;
         s.tracker = tracker;
         s.version += 1;
+    }
+
+    /// Langue voulue maintenant : forcée, sinon compte du site (dernier tracker), sinon Windows.
+    fn wanted_locale(&self) -> String {
+        let s = self.shared.lock().unwrap();
+        crate::i18n::effective(&self.forced, s.tracker.as_ref().and_then(|t| t.locale.as_deref()))
     }
 
     fn save_etags(&self) {
@@ -150,12 +162,9 @@ impl Worker {
                         self.invalid_key = false;
                         self.etags.tracker = None;
                     }
-                    if locale != self.locale {
-                        self.etags.pack = None;
-                    }
                     self.key = key;
                     self.base = base_url.trim_end_matches('/').to_string();
-                    self.locale = locale;
+                    self.forced = locale;
                     if self.key.is_none() {
                         self.set_status(Status::NoKey);
                     }
@@ -221,6 +230,9 @@ impl Worker {
                     (Some(p), Some(t)) => p.pack_version != t.pack_version,
                     _ => true,
                 };
+                drop(s);
+                let need_pack = need_pack || self.wanted_locale() != self.locale;
+                return self.finish(need_pack);
             }
             Ok(resp) => {
                 // ETag renvoyé TEL QUEL (Cloudflare le réécrit en W/"…" ; le site sait le comparer).
@@ -235,6 +247,9 @@ impl Worker {
                         need_pack = s.pack.as_ref().map(|p| p.pack_version != t.pack_version).unwrap_or(true);
                         s.tracker = Some(t);
                         s.version += 1;
+                        drop(s);
+                        let need_pack = need_pack || self.wanted_locale() != self.locale;
+                        return self.finish(need_pack);
                     }
                     Err(e) => {
                         logf!("tracker : JSON invalide ({e})");
@@ -260,11 +275,15 @@ impl Worker {
                 return;
             }
             Err(e) => {
-                logf!("tracker : réseau ({e})");
+                logf!("tracker : réseau ({})", err_kind(&e));
                 self.set_status(Status::Offline);
                 return;
             }
         }
+        let _ = need_pack;
+    }
+
+    fn finish(&mut self, need_pack: bool) {
         if need_pack && !self.fetch_pack() {
             self.save_etags();
             self.set_status(Status::Offline);
@@ -278,9 +297,10 @@ impl Worker {
 
     /// Télécharge le pack (version localisée si elle existe, sinon anglais). Renvoie false en cas d'échec réseau.
     fn fetch_pack(&mut self) -> bool {
+        let want = self.wanted_locale();
         let mut urls = vec![];
-        if self.locale != "en" {
-            urls.push(format!("{}/api/overlay/v1/pack.{}.json", self.base, self.locale));
+        if want != "en" {
+            urls.push(format!("{}/api/overlay/v1/pack.{}.json", self.base, want));
         }
         urls.push(format!("{}/api/overlay/v1/pack.json", self.base));
         for url in urls {
@@ -293,6 +313,7 @@ impl Worker {
             match req.call() {
                 Ok(resp) if resp.status() == 304 => {
                     logf!("pack : 304 ({url})");
+                    self.locale = want.clone();
                     return true;
                 }
                 Ok(resp) => {
@@ -304,6 +325,7 @@ impl Worker {
                             let _ = std::fs::write(Self::cache("pack.json"), &body);
                             self.etags.pack = etag;
                             self.etags.pack_url = Some(url);
+                            self.locale = if p.locale.is_empty() { want.clone() } else { p.locale.clone() };
                             let mut s = self.shared.lock().unwrap();
                             s.pack = Some(p);
                             s.version += 1;
@@ -320,7 +342,7 @@ impl Worker {
                     continue;
                 }
                 Err(e) => {
-                    logf!("pack : erreur ({e})");
+                    logf!("pack : erreur ({})", err_kind(&e));
                     return false;
                 }
             }
@@ -362,6 +384,19 @@ impl Worker {
             (self.notify)();
         }
     }
+}
+
+/// Description d'erreur SANS le détail de la requête (qui peut contenir l'en-tête Authorization).
+fn err_kind(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(c, _) => format!("HTTP {c}"),
+        ureq::Error::Transport(t) => format!("{:?}", t.kind()),
+    }
+}
+
+/// Format attendu d'une clé : « hco_ » + 32 caractères alphanumériques.
+pub fn key_format_ok(k: &str) -> bool {
+    k.len() == 36 && k.starts_with("hco_") && k[4..].bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 fn version_gt(a: &str, b: &str) -> bool {

@@ -24,8 +24,10 @@ pub struct Config {
     pub marker_scale: f32,
     /// URL de base du site (modifiable à la main pour le développement).
     pub base_url: String,
-    /// Langue du pack forcée ("fr", "en"…). Vide = langue de Windows.
+    /// Langue forcée ("en", "fr", "de"…). Vide = automatique : langue du compte sur le site, sinon de Windows.
     pub locale: String,
+    /// Chance minimum (en %) pour afficher un point de ramassage (0 = tout ce que le site envoie).
+    pub min_chance: u32,
     /// Quêtes masquées localement (quest_id).
     pub hidden_quests: Vec<String>,
 }
@@ -41,6 +43,7 @@ impl Default for Config {
             marker_scale: 1.0,
             base_url: DEFAULT_BASE_URL.into(),
             locale: String::new(),
+            min_chance: 0,
             hidden_quests: vec![],
         }
     }
