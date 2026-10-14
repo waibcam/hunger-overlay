@@ -33,6 +33,8 @@ pub enum Req {
     FetchIndex,
     /// Marqueurs d'un objet cherché.
     FetchItem(String),
+    /// Suivre / ne plus suivre une quête (écriture : POST /me/track).
+    Track { quest_id: String, tracked: bool },
     /// Vérifier s'il existe une nouvelle version ; `install` = la télécharger (et la vérifier) pour l'installer.
     CheckUpdate { install: bool },
 }
@@ -46,6 +48,8 @@ pub struct Shared {
     /// Recherche d'objets : index et fichiers des objets cherchés.
     pub search_index: Option<SearchIndex>,
     pub search_items: std::collections::HashMap<String, ItemFile>,
+    /// Message à afficher à l'utilisateur après une écriture refusée ("unsupported" | "readonly" | "failed").
+    pub notice: Option<&'static str>,
     pub status: Option<Status>,
     /// Incrémenté à chaque changement de données (l'interface redessine).
     pub version: u64,
@@ -84,6 +88,8 @@ struct Worker {
     last: Option<Instant>,
     blocked_until: Option<Instant>,
     invalid_key: bool,
+    /// Recettes dont les ingrédients sont actuellement gardés en mémoire.
+    items_for: Vec<String>,
 }
 
 pub fn user_agent() -> String {
@@ -112,6 +118,7 @@ pub fn spawn(shared: SharedRef, notify: Box<dyn Fn() + Send>) -> Sender<Req> {
             last: None,
             blocked_until: None,
             invalid_key: false,
+            items_for: vec![],
         };
         w.load_cache();
         w.run(rx);
@@ -138,9 +145,12 @@ impl Worker {
         if tracker.is_none() {
             self.etags.tracker = None;
         }
-        let items: Option<ItemsPack> = std::fs::read_to_string(Self::cache("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+        let mut items: Option<ItemsPack> = std::fs::read_to_string(Self::cache("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         if items.is_none() {
             self.etags.items = None;
+        }
+        if let Some(it) = items.as_mut() {
+            keep_needed_items(it, tracker.as_ref());
         }
         self.shared.lock().unwrap().items = items;
         logf!("cache : pack={} tracker={}", pack.as_ref().map(|p| p.pack_version.as_str()).unwrap_or("-"), tracker.is_some());
@@ -195,6 +205,7 @@ impl Worker {
                 Req::CheckUpdate { install } => self.check_update(install),
                 Req::FetchIndex => self.fetch_index(),
                 Req::FetchItem(key) => self.fetch_item(&key),
+                Req::Track { quest_id, tracked } => self.track(&quest_id, tracked),
             }
         }
     }
@@ -317,6 +328,18 @@ impl Worker {
         };
         if need_items {
             self.fetch_items();
+        } else {
+            // Liste de fabrication modifiée : on reprend les ingrédients depuis le cache disque (sans réseau).
+            let mut s = self.shared.lock().unwrap();
+            let wanted: Vec<String> = s.tracker.as_ref().map(|t| t.crafting.iter().map(|c| c.recipe_id.clone()).collect()).unwrap_or_default();
+            if wanted != self.items_for && s.items.is_some() {
+                self.items_for = wanted;
+                if let Some(mut it) = std::fs::read_to_string(Self::cache("items.json")).ok().and_then(|b| serde_json::from_str::<ItemsPack>(&b).ok()) {
+                    keep_needed_items(&mut it, s.tracker.as_ref());
+                    s.items = Some(it);
+                    s.version += 1;
+                }
+            }
         }
         self.save_etags();
         self.set_status(Status::Ok);
@@ -375,6 +398,52 @@ impl Worker {
         }
     }
 
+    /// Suivre / ne plus suivre une quête. Le site renvoie le nouvel état du tracker (même JSON que GET).
+    fn track(&mut self, quest_id: &str, tracked: bool) {
+        let Some(key) = self.key.clone() else { return };
+        if !self.allowed(true) {
+            return;
+        }
+        self.history.push(Instant::now());
+        let url = format!("{}/api/overlay/v1/me/track", self.base);
+        let body = serde_json::json!({ "quest_id": quest_id, "tracked": tracked }).to_string();
+        let notice = match self.agent.post(&url).set("Authorization", &format!("Bearer {key}")).set("Content-Type", "application/json").send_string(&body) {
+            Ok(resp) => {
+                let etag = resp.header("ETag").map(|e| e.trim().to_string());
+                let text = resp.into_string().unwrap_or_default();
+                match serde_json::from_str::<Tracker>(&text) {
+                    Ok(t) => {
+                        logf!("suivi : {quest_id} → {tracked}");
+                        let _ = std::fs::write(Self::cache("tracker.json"), &text);
+                        self.etags.tracker = etag.or_else(|| t.rev.as_ref().map(|r| format!("\"{r}\"")));
+                        self.save_etags();
+                        let mut s = self.shared.lock().unwrap();
+                        s.tracker = Some(t);
+                        s.version += 1;
+                        None
+                    }
+                    Err(_) => {
+                        // Réponse sans le tracker : on relit simplement l'état.
+                        self.etags.tracker = None;
+                        self.refresh(true);
+                        None
+                    }
+                }
+            }
+            Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(405, _)) => Some("unsupported"),
+            Err(ureq::Error::Status(403, _)) => Some("readonly"),
+            Err(e) => {
+                logf!("suivi : {}", err_kind(&e));
+                Some("failed")
+            }
+        };
+        if let Some(n) = notice {
+            logf!("suivi refusé : {n}");
+            self.shared.lock().unwrap().notice = Some(n);
+        }
+        (self.notify)();
+    }
+
     fn fetch_items(&mut self) {
         let url = format!("{}/api/overlay/v1/items.json", self.base);
         let mut req = self.agent.get(&url).set("Accept", "application/json");
@@ -387,11 +456,12 @@ impl Worker {
                 let etag = resp.header("ETag").map(|e| e.trim().to_string());
                 let body = resp.into_string().unwrap_or_default();
                 match serde_json::from_str::<ItemsPack>(&body) {
-                    Ok(it) => {
+                    Ok(mut it) => {
                         logf!("items : 200 ({} objets, {} Ko)", it.items.len(), body.len() / 1024);
                         let _ = std::fs::write(Self::cache("items.json"), &body);
                         self.etags.items = etag;
                         let mut s = self.shared.lock().unwrap();
+                        keep_needed_items(&mut it, s.tracker.as_ref());
                         s.items = Some(it);
                         s.version += 1;
                     }
@@ -506,6 +576,25 @@ impl Worker {
             Err(e) => logf!("mise à jour {latest} : {e}"),
         }
     }
+}
+
+/// `items.json` couvre tous les ingrédients de toutes les recettes : on ne garde en mémoire que ceux de la liste de
+/// fabrication du joueur (le fichier complet reste en cache disque pour les changements de liste).
+fn keep_needed_items(it: &mut ItemsPack, tracker: Option<&Tracker>) {
+    let needed: std::collections::HashSet<String> = tracker
+        .map(|t| {
+            t.crafting
+                .iter()
+                .flat_map(|c| c.ingredients.iter())
+                .map(|i| match &i.item_id {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    it.items.retain(|k, _| needed.contains(k));
+    it.items.shrink_to_fit();
 }
 
 /// Description d'erreur SANS le détail de la requête (qui peut contenir l'en-tête Authorization).

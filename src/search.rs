@@ -27,11 +27,14 @@ const MAX_RESULTS: usize = 12;
 
 #[derive(Clone)]
 pub struct Entry {
+    /// `ID_…` pour un objet, `quest:<quest_id>` pour une quête.
     pub key: String,
     pub name: String,
     pub rarity: Option<String>,
     pub n: u32,
     pub sources: Vec<String>,
+    /// Quête : (donneur, déjà suivie).
+    pub quest: Option<(String, bool)>,
 }
 
 pub struct Search {
@@ -44,6 +47,8 @@ pub struct Search {
     k: f32,
     theme: &'static Theme,
     entries: Option<Vec<Entry>>,
+    /// L'index des objets est-il arrivé ? (les quêtes, elles, viennent du pack déjà chargé)
+    items_loaded: bool,
     results: Vec<usize>,
     sel: usize,
     hover: Option<usize>,
@@ -170,7 +175,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 impl Search {
     /// `area` = rectangle écran du jeu, pour centrer la fenêtre dessus.
-    pub fn open(s: &'static Strings, theme: &str, entries: Option<Vec<Entry>>, area: (i32, i32, i32, i32)) -> Option<Search> {
+    pub fn open(s: &'static Strings, theme: &str, entries: Option<Vec<Entry>>, items_loaded: bool, area: (i32, i32, i32, i32)) -> Option<Search> {
         unsafe {
             let inst = GetModuleHandleW(None).ok()?;
             let class = w!("HungerOverlaySearch");
@@ -233,6 +238,7 @@ impl Search {
                 k,
                 theme: th,
                 entries,
+                items_loaded,
                 results: vec![],
                 sel: 0,
                 hover: None,
@@ -252,11 +258,12 @@ impl Search {
     /// L'index vient d'arriver (il était en cours de téléchargement).
     pub fn set_entries(&mut self, e: Vec<Entry>) {
         self.entries = Some(e);
+        self.items_loaded = true;
         self.refilter();
     }
 
     pub fn has_entries(&self) -> bool {
-        self.entries.is_some()
+        self.items_loaded
     }
 
     fn query(&self) -> String {
@@ -278,10 +285,12 @@ impl Search {
                     .enumerate()
                     .filter_map(|(i, e)| {
                         let n = fold(&e.name);
+                        // Les quêtes passent devant les objets à pertinence égale (elles sont peu nombreuses).
+                        let quest_bonus = if e.quest.is_some() { 10_000 } else { 0 };
                         if n.starts_with(&q) {
-                            Some((0, e.n, i))
+                            Some((0, e.n + quest_bonus, i))
                         } else if n.contains(&q) || fold(&e.key).contains(&q) {
-                            Some((1, e.n, i))
+                            Some((1, e.n + quest_bonus, i))
                         } else {
                             None
                         }
@@ -367,13 +376,25 @@ impl Search {
             }
             Some(es) => {
                 if self.results.is_empty() && !self.query().is_empty() {
-                    r.text(s.search_none, Font::Text, pad, y, w - 2.0 * pad, t.sub);
+                    let msg = if self.items_loaded { s.search_none } else { s.search_loading };
+                    r.text(msg, Font::Text, pad, y, w - 2.0 * pad, t.sub);
                 }
                 for (ri, &i) in self.results.iter().enumerate() {
                     let e = &es[i];
                     let rh = 38.0 * k;
                     if ri == self.sel {
                         r.fill_rrect(pad - 6.0 * k, y, w - pad + 6.0 * k, y + rh, 5.0 * k, t.hover);
+                    }
+                    if let Some((giver, tracked)) = &e.quest {
+                        // Quête : 📜, donneur, et si elle est déjà suivie.
+                        let right = format!("{giver} · {}", if *tracked { s.quest_tracked } else { s.quest_track });
+                        let (rw, _) = r.measure(&right, Font::Small, 280.0 * k);
+                        r.text("📜", Font::Text, pad, y + 9.0 * k, 18.0 * k, t.text);
+                        r.text(&e.name, Font::Text, pad + 20.0 * k, y + 9.0 * k, w - 2.0 * pad - rw - 32.0 * k, if *tracked { t.accent } else { t.text });
+                        r.text(&right, Font::Small, w - pad - rw, y + 11.0 * k, rw + 2.0, t.sub);
+                        rows.push((y, y + rh, i));
+                        y += rh + 2.0 * k;
+                        continue;
                     }
                     r.fill_circle(pad + 6.0 * k, y + rh / 2.0, 5.0 * k, rarity_color(e.rarity.as_deref()));
                     let src: Vec<&str> = e

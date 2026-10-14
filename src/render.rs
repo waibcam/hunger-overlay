@@ -163,6 +163,20 @@ impl Renderer {
         &self.fonts[f as usize]
     }
 
+    /// Libère l'image de rendu (plusieurs Mo en plein écran) quand rien n'est affiché.
+    pub fn release(&mut self) {
+        if self.dib.is_invalid() {
+            return;
+        }
+        unsafe {
+            SelectObject(self.mem, self.old);
+            let _ = DeleteObject(self.dib);
+        }
+        self.dib = HBITMAP::default();
+        self.w = 0;
+        self.h = 0;
+    }
+
     fn ensure_size(&mut self, w: i32, h: i32) -> bool {
         if w == self.w && h == self.h && !self.dib.is_invalid() {
             return true;

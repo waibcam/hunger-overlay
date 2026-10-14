@@ -47,7 +47,7 @@ features = [
 winresource = "0.1"
 
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"

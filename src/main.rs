@@ -16,6 +16,7 @@ mod model;
 mod net;
 mod panel;
 mod render;
+mod refs;
 mod resync;
 mod search;
 mod settings;
@@ -48,6 +49,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_NET: u32 = WM_APP + 2;
 const TIMER_TICK: usize = 1;
+/// Une fois, 20 s après le démarrage : rendre la mémoire du chargement initial (JSON, décodage…).
+const TIMER_TRIM: usize = 2;
 const GAME_EXE: &str = "projectrlh-win64-shipping.exe";
 
 /// Loi de zoom mesurée : 11 niveaux, facteur 1 + 0,5·n, animation exponentielle (k ≈ 5/s).
@@ -185,6 +188,8 @@ struct App {
     /// Installation demandée depuis le menu (en mode « me prévenir »).
     install_requested: bool,
     next_update_check: Instant,
+    /// Page à ouvrir si l'utilisateur clique sur la dernière notification.
+    balloon_url: Option<String>,
     /// Fenêtre « Chercher un objet ».
     search: Option<search::Search>,
     /// Objets / index déjà demandés au réseau (pour ne pas redemander en boucle).
@@ -219,7 +224,7 @@ fn load_remember(client: (i32, i32, i32, i32)) -> Option<(usize, Square, PanelSi
     let idx = i32_at(12)? as usize;
     let sq = Square { x0: f64_at(16)?, y0: f64_at(24)?, side: f64_at(32)? };
     let sig = PanelSig::from_bytes(b.get(40..)?)?;
-    (idx < detect::REFS.len()).then_some((idx, sq, sig))
+    (idx < crate::refs::NAMES.len()).then_some((idx, sq, sig))
 }
 
 /// Ce qu'on savait au moment de la capture envoyée au fil de calcul.
@@ -271,6 +276,13 @@ fn client_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         let mut p = POINT { x: 0, y: 0 };
         let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p);
         Some((p.x, p.y, r.right - r.left, r.bottom - r.top))
+    }
+}
+
+/// Rend à Windows les pages mémoire inutilisées (le « working set » retombe au strict nécessaire).
+fn trim_memory() {
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(windows::Win32::System::Threading::GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
 
@@ -644,6 +656,10 @@ impl App {
             }
             if !visible {
                 self.show_panel(false);
+                // Carte masquée : on rend la mémoire des images de rendu (2560×1440 ≈ 15 Mo) à Windows.
+                self.renderer.release();
+                self.prenderer.release();
+                trim_memory();
             }
             self.dirty = true;
         }
@@ -818,14 +834,14 @@ impl App {
         let g = capture::grab_gray(x, y, w, h)?;
         let sq = detect::find_square(&g)?;
         let (idx, score, margin) = detect::identify(&g, &sq)?;
-        logf!("identification : {} score {:.3} marge {:.3}", detect::REFS[idx].0, score, margin);
+        logf!("identification : {} score {:.3} marge {:.3}", crate::refs::NAMES[idx], score, margin);
         Some(Self::new_open(idx, sq, Instant::now()))
     }
 
     fn new_open(idx: usize, sq: Square, now: Instant) -> OpenMap {
         OpenMap {
             map_idx: idx,
-            map_id: detect::REFS[idx].0,
+            map_id: crate::refs::NAMES[idx],
             sq,
             n: 0,
             zoom: 1.0,
@@ -864,7 +880,7 @@ impl App {
         if let Some((info, res)) = self.take_resync() {
             let (Some((_, sq, sig)), Some(f)) = (info.lost, res.found) else { return None };
             let idx = res.map;
-            logf!("recherche complète : {} score {:.3}, n {}, {} ms", detect::REFS[idx].0, f.score, f.n, res.ms);
+            logf!("recherche complète : {} score {:.3}, n {}, {} ms", crate::refs::NAMES[idx], f.score, f.n, res.ms);
             if f.score < 0.6 {
                 return None;
             }
@@ -942,7 +958,7 @@ impl App {
             self.s = s;
             self.dirty = true;
         }
-        let sh = self.shared.lock().unwrap();
+        let mut sh = self.shared.lock().unwrap();
         let st = sh.status.clone();
         if st != self.last_status {
             self.last_status = st.clone();
@@ -976,7 +992,33 @@ impl App {
         }
         if let (Some(st), Some(ix)) = (self.search.as_mut(), sh.search_index.as_ref()) {
             if !st.has_entries() {
-                st.set_entries(search_entries(ix));
+                st.set_entries(search_entries(Some(ix), sh.pack.as_ref(), sh.tracker.as_ref()));
+            }
+        }
+        // Écriture refusée (suivi de quête) : on prévient l'utilisateur.
+        if let Some(n) = sh.notice.take() {
+            let msg = match n {
+                "unsupported" => self.s.track_unsupported,
+                "readonly" => self.s.track_readonly,
+                _ => self.s.track_failed,
+            };
+            self.balloon_url = (n == "readonly").then(|| format!("{}/account/security#overlay-keys", self.cfg.base_url.trim_end_matches('/')));
+            tray::balloon(self.main, "Hunger Overlay", msg);
+        }
+        if let Some(p) = sh.pack.as_ref() {
+            let mut changed = false;
+            for ly in &p.layers {
+                let id = if ly.id.starts_with("harvest_") { "harvest".to_string() } else { ly.id.clone() };
+                if !self.cfg.layers_known.contains(&id) {
+                    self.cfg.layers_known.push(id.clone());
+                    if ly.default_on && !self.cfg.layers_on.contains(&id) {
+                        self.cfg.layers_on.push(id);
+                    }
+                    changed = true;
+                }
+            }
+            if changed {
+                self.cfg.save();
             }
         }
         let MapState::Open(m) = &mut self.state else { return };
@@ -1373,15 +1415,25 @@ impl App {
             }
             return;
         }
-        let entries = self.shared.lock().unwrap().search_index.as_ref().map(search_entries);
-        if entries.is_none() && !self.index_requested {
+        let (entries, loaded) = {
+            let sh = self.shared.lock().unwrap();
+            (search_entries(sh.search_index.as_ref(), sh.pack.as_ref(), sh.tracker.as_ref()), sh.search_index.is_some())
+        };
+        if !loaded && !self.index_requested {
             self.index_requested = true;
             let _ = self.net.send(Req::FetchIndex);
         }
-        self.search = search::Search::open(self.s, &self.cfg.theme, entries, self.client);
+        self.search = search::Search::open(self.s, &self.cfg.theme, Some(entries), loaded, self.client);
     }
 
     fn search_pick(&mut self, key: String) {
+        // Quête : suivre / ne plus suivre (écriture sur le compte, le site renvoie le nouveau tracker).
+        if let Some(qid) = key.strip_prefix("quest:") {
+            let tracked = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.tracked.iter().any(|q| q.quest_id == qid)).unwrap_or(false);
+            let _ = self.net.send(Req::Track { quest_id: qid.to_string(), tracked: !tracked });
+            self.close_search();
+            return;
+        }
         if !self.cfg.search_items.contains(&key) {
             self.cfg.search_items.push(key.clone());
             self.cfg.save();
@@ -1610,11 +1662,33 @@ fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[Stri
     }
 }
 
-fn search_entries(ix: &model::SearchIndex) -> Vec<search::Entry> {
-    ix.items
-        .iter()
-        .map(|i| search::Entry { key: i.item_key.clone(), name: i.name.clone(), rarity: i.rarity.clone(), n: i.n, sources: i.sources.clone() })
-        .collect()
+/// Entrées de la recherche : les quêtes du pack (titre traduit, donneur, déjà suivie ?) puis les objets de l'index.
+fn search_entries(ix: Option<&model::SearchIndex>, pack: Option<&model::Pack>, tracker: Option<&model::Tracker>) -> Vec<search::Entry> {
+    let mut out = vec![];
+    if let Some(p) = pack {
+        for (qid, q) in &p.quests {
+            let tracked = tracker.map(|t| t.tracked.iter().any(|tq| tq.quest_id == *qid)).unwrap_or(false);
+            out.push(search::Entry {
+                key: format!("quest:{qid}"),
+                name: q.title.clone(),
+                rarity: None,
+                n: 0,
+                sources: vec![],
+                quest: Some((q.giver.clone().unwrap_or_default(), tracked)),
+            });
+        }
+    }
+    if let Some(ix) = ix {
+        out.extend(ix.items.iter().map(|i| search::Entry {
+            key: i.item_key.clone(),
+            name: i.name.clone(),
+            rarity: i.rarity.clone(),
+            n: i.n,
+            sources: i.sources.clone(),
+            quest: None,
+        }));
+    }
+    out
 }
 
 unsafe extern "system" fn find_game(h: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
@@ -1695,6 +1769,13 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             with_app(|a| a.tick());
             LRESULT(0)
         }
+        WM_TIMER if wp.0 == TIMER_TRIM => {
+            let _ = KillTimer(hwnd, TIMER_TRIM);
+            if !with_app(|a| a.shown).unwrap_or(false) {
+                trim_memory();
+            }
+            LRESULT(0)
+        }
         WM_NET => {
             with_app(|a| {
                 a.dirty = true;
@@ -1710,6 +1791,14 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 tray::menu(hwnd, s, upd);
             } else if ev == WM_LBUTTONDBLCLK {
                 with_app(|a| a.open_settings());
+            } else if ev == 0x0405 {
+                // NIN_BALLOONUSERCLICK : ouvrir la page liée à la notification (ex. réglage de la clé).
+                if let Some(url) = with_app(|a| a.balloon_url.take()).flatten() {
+                    if url.starts_with("https://") {
+                        let w = wide(&url);
+                        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), PCWSTR(w.as_ptr()), None, None, SW_SHOWNORMAL);
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -1979,6 +2068,7 @@ fn main() {
             rs_job: None,
             rs_next_id: 1,
             install_requested: false,
+            balloon_url: None,
             search: None,
             items_requested: HashSet::new(),
             index_requested: false,
@@ -2002,6 +2092,7 @@ fn main() {
             });
         }
         SetTimer(main, TIMER_TICK, 15, None);
+        SetTimer(main, TIMER_TRIM, 20_000, None);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

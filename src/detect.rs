@@ -7,12 +7,7 @@
 
 use crate::capture::Gray;
 
-pub const REF_N: usize = 128;
-pub static REFS: [(&str, &[u8]); 3] = [
-    ("Map01", include_bytes!("../assets/ref_Map01.bin")),
-    ("Map02", include_bytes!("../assets/ref_Map02.bin")),
-    ("Map03", include_bytes!("../assets/ref_Map03.bin")),
-];
+pub const REF_N: usize = crate::refs::THUMB;
 
 const BRIGHT: u8 = 150;
 
@@ -120,10 +115,10 @@ fn ncc(a: &[f64], b: &[u8]) -> f64 {
     }
 }
 
-/// Identifie la carte : (index dans REFS, score, écart avec la 2e). None si trop incertain.
+/// Identifie la carte : (index dans refs::NAMES, score, écart avec la 2e). None si trop incertain.
 pub fn identify(g: &Gray, sq: &Square) -> Option<(usize, f64, f64)> {
     let t = thumb(g, sq);
-    let mut scores: Vec<(usize, f64)> = REFS.iter().enumerate().map(|(i, (_, r))| (i, ncc(&t, r))).collect();
+    let mut scores: Vec<(usize, f64)> = (0..crate::refs::NAMES.len()).map(|i| (i, ncc(&t, crate::refs::thumb(i)))).collect();
     scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     let (best, s1) = scores[0];
     let s2 = scores[1].1;

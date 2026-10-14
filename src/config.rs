@@ -41,6 +41,9 @@ pub struct Config {
     pub theme: String,
     /// Calques cochés dans le panneau (id).
     pub layers_on: Vec<String>,
+    /// Calques déjà vus : un nouveau calque marqué `default_on` par le site est coché UNE fois, ensuite le choix
+    /// de l'utilisateur prime.
+    pub layers_known: Vec<String>,
     /// Objets cherchés affichés sur la carte (item_key).
     pub search_items: Vec<String>,
     /// Position du panneau (fractions de la fenêtre du jeu) ; None = à droite de la carte.
@@ -68,6 +71,7 @@ impl Default for Config {
             auto_update: true,
             theme: "auto".into(),
             layers_on: vec![],
+            layers_known: vec![],
             search_items: vec![],
             panel_pos: None,
             panel_opacity: 86,

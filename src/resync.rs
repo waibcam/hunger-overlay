@@ -8,12 +8,7 @@
 
 use crate::capture::Gray;
 
-const RN: usize = 512;
-pub static REF512: [&[u8]; 3] = [
-    include_bytes!("../assets/ref512_Map01.bin"),
-    include_bytes!("../assets/ref512_Map02.bin"),
-    include_bytes!("../assets/ref512_Map03.bin"),
-];
+const RN: usize = crate::refs::N;
 
 /// Blocs plus sombres que ce seuil = hors carte (fond de l'écran carte, fenêtres masquées).
 const DARK: f32 = 55.0;
@@ -73,7 +68,7 @@ pub fn pyramid(g: &Gray, masked: &dyn Fn(usize, usize) -> bool) -> Pyramid {
 
 /// Référence rééchantillonnée à m×m (moyenne de zone si réduction, bilinéaire sinon).
 fn ref_at(map: usize, m: usize) -> Vec<f32> {
-    let r = REF512[map];
+    let r = crate::refs::full(map);
     let k = RN as f64 / m as f64;
     let mut out = vec![0.0; m * m];
     let p = |x: usize, y: usize| r[y.min(RN - 1) * RN + x.min(RN - 1)] as f32;
@@ -319,7 +314,7 @@ pub fn spawn_worker(notify: Box<dyn Fn() + Send>) -> (std::sync::mpsc::Sender<Jo
             let weak = found.as_ref().map(|f| f.score < 0.6).unwrap_or(true);
             if job.kind == Kind::Global {
                 // Carte perdue : la dernière connue d'abord, puis les autres (on a pu changer de raid).
-                for mi in std::iter::once(job.map).chain((0..REF512.len()).filter(|&i| i != job.map)) {
+                for mi in std::iter::once(job.map).chain((0..crate::refs::NAMES.len()).filter(|&i| i != job.map)) {
                     if let Some(gf) = locate_global(&p, mi, job.side0, job.center) {
                         global_used = true;
                         if found.as_ref().map(|f: &Found| gf.score > f.score).unwrap_or(true) {
@@ -365,6 +360,12 @@ mod tests {
             let (w, h): (usize, usize) = (v[5].parse().unwrap(), v[6].parse().unwrap());
             let g = Gray { w, h, px: std::fs::read(format!("{dir}/{name}.gray")).unwrap() };
             let masked = |_: usize, _: usize| false;
+            if n == 0 {
+                // Vue par défaut : identification de la carte avec la vignette dérivée de la référence 4 bits.
+                let sq = crate::detect::find_square(&g).expect("carré");
+                let id = crate::detect::identify(&g, &sq).expect("identification");
+                println!("{name:7} identification : {} score {:.3} marge {:.3}", crate::refs::NAMES[id.0], id.1, id.2);
+            }
             let t0 = std::time::Instant::now();
             let p = pyramid(&g, &masked);
             let tp = t0.elapsed().as_millis();
