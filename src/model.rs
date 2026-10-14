@@ -359,6 +359,8 @@ pub struct ViewOpts<'a> {
     pub items: Option<&'a ItemsPack>,
     /// Objets cherchés : (item_key, nom, marqueurs si déjà chargés).
     pub searched: Vec<(String, String, Option<&'a [Marker]>)>,
+    /// Titre du calque « Récolte » fusionné (traduit).
+    pub harvest_title: &'a str,
 }
 
 /// Couleurs des objets cherchés (distinctes de la palette des quêtes du site).
@@ -537,15 +539,31 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         out.legend.push(lq);
     }
 
-    // 4. Calques (extractions, lieux, récolte, clés, pièges…), cochés dans le panneau.
-    for (li, ly) in pack.layers.iter().enumerate() {
-        let on = o.layers_on.iter().any(|l| *l == ly.id);
+    // 4. Calques (apparitions, extractions, lieux, récolte, clés, pièges…), cochés dans le panneau.
+    //    Les calques de récolte par métier (harvest_*) sont fusionnés en un seul « Récolte », limité aux nœuds
+    //    que le joueur peut récolter d'après les niveaux déclarés sur le site (tout s'affiche si rien n'est déclaré).
+    let harvest_on = o.layers_on.iter().any(|l| l == "harvest");
+    let mut harvest_slot: Option<usize> = None;
+    for ly in pack.layers.iter() {
+        let is_harvest = ly.id.starts_with("harvest_");
+        let on = if is_harvest { harvest_on } else { o.layers_on.iter().any(|l| *l == ly.id) };
         let color = parse_color(&ly.color);
+        if is_harvest && harvest_slot.is_none() {
+            harvest_slot = Some(out.layers.len());
+            out.layers.push(LegendLayer { id: "harvest".into(), title: o.harvest_title.into(), color: (0.42, 0.75, 0.35), diamond: false, on, here: 0 });
+        }
+        let li = if is_harvest { harvest_slot.unwrap() } else { out.layers.len() };
         let mut here = 0;
         for mk in ly.markers.iter().filter(|m| m.map == map_id) {
             let Some((u, v)) = to_uv(mk) else { continue };
             if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
                 continue; // hors de la texture (bord de carte)
+            }
+            if is_harvest {
+                let player = mk.profession.as_ref().and_then(|p| tracker.gathering_levels.get(p)).copied();
+                if matches!((mk.required_level, player), (Some(r), Some(p)) if r > p) {
+                    continue; // niveau insuffisant
+                }
             }
             here += 1;
             if on {
@@ -555,7 +573,11 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
                 out.points.push(p);
             }
         }
-        out.layers.push(LegendLayer { id: ly.id.clone(), title: ly.title.clone(), color, diamond: ly.shape == "diamond", on, here });
+        if is_harvest {
+            out.layers[li].here += here;
+        } else {
+            out.layers.push(LegendLayer { id: ly.id.clone(), title: ly.title.clone(), color, diamond: ly.shape == "diamond", on, here });
+        }
     }
     out
 }
@@ -574,7 +596,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![] };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest" };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();

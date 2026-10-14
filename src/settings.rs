@@ -44,6 +44,7 @@ pub struct Init<'a> {
     pub min_chance: u32,
     pub auto_update: bool,
     pub theme: &'a str,
+    pub panel_opacity: u32,
     /// Libellé de la langue « Auto (EN) » calculé par l'appli.
     pub auto_lang: String,
 }
@@ -59,6 +60,7 @@ pub struct Values {
     pub min_chance: u32,
     pub auto_update: bool,
     pub theme: String,
+    pub panel_opacity: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -67,6 +69,7 @@ enum W {
     Test,
     MapKey,
     Slider,
+    Opacity,
     ShowDone,
     LangPrev,
     LangNext,
@@ -174,8 +177,10 @@ pub struct Settings {
     auto_lang: String,
     hits: Vec<Hit>,
     hover: Option<W>,
-    dragging: bool,
+    /// Curseur en cours de déplacement (chance ou opacité).
+    dragging: Option<W>,
     slider: (f32, f32),
+    slider2: (f32, f32),
     edit_rect: (f32, f32, f32, f32),
     height: f32,
 }
@@ -315,6 +320,7 @@ impl Settings {
                 min_chance: init.min_chance,
                 auto_update: init.auto_update,
                 theme: if init.theme.is_empty() { "auto".into() } else { init.theme.to_string() },
+                panel_opacity: init.panel_opacity.clamp(20, 100),
             };
             let mut st = Settings {
                 hwnd,
@@ -332,8 +338,9 @@ impl Settings {
                 auto_lang: init.auto_lang,
                 hits: vec![],
                 hover: None,
-                dragging: false,
+                dragging: None,
                 slider: (0.0, 1.0),
+                slider2: (0.0, 1.0),
                 edit_rect: (0.0, 0.0, 0.0, 0.0),
                 height: 600.0,
             };
@@ -546,7 +553,7 @@ impl Settings {
             let kx = sx0 + (sx1 - sx0) * f;
             r.line(sx0, sy, sx1, sy, 4.0 * k, t.border);
             r.line(sx0, sy, kx, sy, 4.0 * k, t.accent);
-            r.fill_circle(kx, sy, if hover == Some(W::Slider) || self.dragging { 9.0 * k } else { 8.0 * k }, t.accent);
+            r.fill_circle(kx, sy, if hover == Some(W::Slider) || self.dragging == Some(W::Slider) { 9.0 * k } else { 8.0 * k }, t.accent);
             r.fill_circle(kx, sy, 3.5 * k, t.card);
         }
         hits.push(Hit { r: (sx0 - 10.0 * k, sy - 12.0 * k, sx1 + 10.0 * k, sy + 12.0 * k), w: W::Slider });
@@ -558,7 +565,7 @@ impl Settings {
         // ---- Affichage ----
         section(&mut y, s.sec_display);
         let c2 = y;
-        let disp_h = 16.0 * k + 32.0 * k + row_gap + 32.0 * k + row_gap + 22.0 * k + 16.0 * k;
+        let disp_h = 16.0 * k + 32.0 * k + row_gap + 32.0 * k + row_gap + 50.0 * k + row_gap + 22.0 * k + 16.0 * k;
         card(c2, c2 + disp_h);
         y += 16.0 * k;
         let lang_txt = if self.v.locale.is_empty() {
@@ -595,6 +602,25 @@ impl Settings {
             sx += segw;
         }
         y += 32.0 * k + row_gap;
+        // Opacité du fond du panneau sur la carte (20 à 100 %).
+        let val = format!("{} %", self.v.panel_opacity);
+        let vw = r.measure(&val, Font::Bold, 200.0).0;
+        row_label(y, s.panel_opacity, None, vw);
+        if draw {
+            r.text(&val, Font::Bold, inner_r - vw, y, vw + 2.0, t.accent);
+        }
+        let (ox0, ox1, oy) = (pad + 26.0 * k, inner_r - 10.0 * k, y + 34.0 * k);
+        self.slider2 = (ox0, ox1);
+        if draw {
+            let f = (self.v.panel_opacity as f32 - 20.0) / 80.0;
+            let kx = ox0 + (ox1 - ox0) * f;
+            r.line(ox0, oy, ox1, oy, 4.0 * k, t.border);
+            r.line(ox0, oy, kx, oy, 4.0 * k, t.accent);
+            r.fill_circle(kx, oy, if hover == Some(W::Opacity) || self.dragging == Some(W::Opacity) { 9.0 * k } else { 8.0 * k }, t.accent);
+            r.fill_circle(kx, oy, 3.5 * k, t.card);
+        }
+        hits.push(Hit { r: (ox0 - 10.0 * k, oy - 12.0 * k, ox1 + 10.0 * k, oy + 12.0 * k), w: W::Opacity });
+        y += 50.0 * k + row_gap;
         row_label(y, s.capture_visible, None, 40.0 * k);
         toggle(&mut hits, inner_r - 40.0 * k, y, self.v.capture_visible, W::Capture);
         y = c2 + disp_h + 18.0 * k;
@@ -641,13 +667,24 @@ impl Settings {
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
-        if self.dragging {
-            self.set_slider(x);
-            return;
+        match self.dragging {
+            Some(W::Slider) => return self.set_slider(x),
+            Some(W::Opacity) => return self.set_opacity(x),
+            _ => {}
         }
         let h = self.hit(x, y);
         if h != self.hover {
             self.hover = h;
+            self.redraw();
+        }
+    }
+
+    fn set_opacity(&mut self, x: f32) {
+        let (a, b) = self.slider2;
+        let f = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        let v = 20 + (f * 80.0).round() as u32;
+        if v != self.v.panel_opacity {
+            self.v.panel_opacity = v;
             self.redraw();
         }
     }
@@ -665,8 +702,7 @@ impl Settings {
     /// Clic dans la fenêtre. Renvoie une action à traiter par l'appli (tester, appliquer, enregistrer…).
     pub fn click(&mut self, x: f32, y: f32, down: bool) -> Option<i32> {
         if !down {
-            if self.dragging {
-                self.dragging = false;
+            if self.dragging.take().is_some() {
                 unsafe {
                     let _ = ReleaseCapture();
                 }
@@ -677,12 +713,16 @@ impl Settings {
         let w = self.hit(x, y)?;
         let mut out = None;
         match w {
-            W::Slider => {
-                self.dragging = true;
+            W::Slider | W::Opacity => {
+                self.dragging = Some(w);
                 unsafe {
                     SetCapture(self.hwnd);
                 }
-                self.set_slider(x);
+                if w == W::Slider {
+                    self.set_slider(x);
+                } else {
+                    self.set_opacity(x);
+                }
             }
             W::KeyShow => self.toggle_mask(),
             W::Test => out = Some(ID_TEST),

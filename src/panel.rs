@@ -9,6 +9,8 @@ use crate::render::{Font, Renderer, Rgba};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// Poignée : glisser pour déplacer le panneau, double-clic pour le remettre à sa place.
+    Move,
     Settings,
     Collapse,
     ToggleDone,
@@ -46,6 +48,8 @@ pub struct View<'a> {
     pub min_chance: u32,
     pub lang_label: String,
     pub collapsed: bool,
+    /// Opacité du fond (0..1).
+    pub opacity: f32,
 }
 
 const TEXT: Rgba = (0.97, 0.95, 0.9, 1.0);
@@ -62,7 +66,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     let mut y = pad;
     let hov = |hits: &Vec<Hit>| hover.map(|h| h == hits.len()).unwrap_or(false);
     if draw {
-        r.fill_rrect(0.5, 0.5, w - 0.5, max_h.max(1.0) - 0.5, 8.0 * sc, (0.07, 0.06, 0.05, 0.86));
+        r.fill_rrect(0.5, 0.5, w - 0.5, max_h.max(1.0) - 0.5, 8.0 * sc, (0.07, 0.06, 0.05, v.opacity));
         r.stroke_rrect(0.5, 0.5, w - 0.5, max_h.max(1.0) - 0.5, 8.0 * sc, 1.0 * sc, (0.85, 0.75, 0.55, 0.35));
     }
 
@@ -98,9 +102,11 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     };
     let gx = w - pad - gs;
     let cx = gx - gs - 6.0 * sc;
+    let mx = cx - gs - 6.0 * sc;
     if draw {
-        r.text(s.legend_title, Font::Title, pad, y + (gs - th) / 2.0, cx - pad - 4.0 * sc, GOLD);
+        r.text(s.legend_title, Font::Title, pad, y + (gs - th) / 2.0, mx - pad - 4.0 * sc, GOLD);
     }
+    icon_btn(&mut hits, mx, "✥", Action::Move);
     icon_btn(&mut hits, cx, if v.collapsed { "▸" } else { "▾" }, Action::Collapse);
     icon_btn(&mut hits, gx, "⚙", Action::Settings);
     y += gs + 8.0 * sc;

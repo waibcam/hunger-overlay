@@ -43,6 +43,10 @@ pub struct Config {
     pub layers_on: Vec<String>,
     /// Objets cherchés affichés sur la carte (item_key).
     pub search_items: Vec<String>,
+    /// Position du panneau (fractions de la fenêtre du jeu) ; None = à droite de la carte.
+    pub panel_pos: Option<(f32, f32)>,
+    /// Opacité du fond du panneau, en % (20 à 100).
+    pub panel_opacity: u32,
 }
 
 impl Default for Config {
@@ -65,6 +69,8 @@ impl Default for Config {
             theme: "auto".into(),
             layers_on: vec![],
             search_items: vec![],
+            panel_pos: None,
+            panel_opacity: 86,
         }
     }
 }

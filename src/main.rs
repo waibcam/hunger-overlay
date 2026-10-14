@@ -149,6 +149,8 @@ struct App {
     panel_hits: Vec<panel::Hit>,
     panel_hover: Option<usize>,
     panel_shown: bool,
+    /// Déplacement du panneau en cours : point saisi (coordonnées locales au panneau).
+    panel_grab: Option<(f32, f32)>,
     cfg: Config,
     s: &'static i18n::Strings,
     shared: SharedRef,
@@ -343,6 +345,36 @@ impl App {
         }
     }
 
+    /// Bouton enfoncé sur le panneau : début de déplacement si c'est la poignée.
+    fn panel_down(&mut self, x: f32, y: f32) -> bool {
+        let on_grip = self.panel_hits.iter().any(|h| h.contains(x, y) && h.action == panel::Action::Move);
+        if on_grip {
+            self.panel_grab = Some((x, y));
+        }
+        on_grip
+    }
+
+    /// Déplacement du panneau (curseur en coordonnées écran).
+    fn panel_drag_to(&mut self, sx: i32, sy: i32) {
+        let Some((gx, gy)) = self.panel_grab else { return };
+        let (cx, cy, cw, ch) = self.client;
+        if cw <= 0 || ch <= 0 {
+            return;
+        }
+        let x = (sx - cx) as f32 - gx;
+        let y = (sy - cy) as f32 - gy;
+        self.cfg.panel_pos = Some(((x / cw as f32).clamp(0.0, 0.95), (y / ch as f32).clamp(0.0, 0.95)));
+        self.dirty = true;
+    }
+
+    fn panel_up(&mut self) -> bool {
+        if self.panel_grab.take().is_some() {
+            self.cfg.save();
+            return true;
+        }
+        false
+    }
+
     fn panel_mouse(&mut self, x: f32, y: f32) {
         let h = self.panel_hits.iter().position(|h| h.contains(x, y));
         if h != self.panel_hover {
@@ -355,6 +387,7 @@ impl App {
     fn panel_click(&mut self, x: f32, y: f32) {
         let Some(hit) = self.panel_hits.iter().find(|h| h.contains(x, y)).cloned() else { return };
         match hit.action {
+            panel::Action::Move => return,
             panel::Action::Settings => {
                 self.open_settings();
                 return;
@@ -969,6 +1002,7 @@ impl App {
                 layers_on: &self.cfg.layers_on,
                 items: sh.items.as_ref(),
                 searched,
+                harvest_title: self.s.harvest_layer,
             };
             let v = model::build_view(p, t, &opts);
             m.points = v.points;
@@ -1183,7 +1217,28 @@ impl App {
             let hov = self.hover == Some(i);
             let rr = if hov { rad * 1.35 } else { rad };
             let c: Rgba = (p.color.0, p.color.1, p.color.2, if p.locked { 0.45 } else { 1.0 });
-            if p.layer.is_some() {
+            let layer_id = p.layer.and_then(|li| m.layers.get(li)).map(|l| l.id.as_str());
+            if p.place || layer_id == Some("places") {
+                // Lieu nommé : losange plein bien visible + son nom à côté.
+                let dr = rad * 1.25;
+                let gold: Rgba = if p.place { c } else { (0.95, 0.78, 0.35, 1.0) };
+                r.diamond(x, y, dr, 7.0 * sc, (0.0, 0.0, 0.0, 0.75));
+                r.diamond(x, y, dr * 0.55, dr * 0.9, (0.1, 0.08, 0.05, 0.85));
+                r.diamond(x, y, dr, 2.6 * sc, gold);
+                if !p.label.is_empty() {
+                    let tw = r.measure(&p.label, Font::Small, 400.0 * sc).0;
+                    let (lx, ly) = (x + dr + 5.0 * sc, y - 9.0 * sc);
+                    r.fill_rrect(lx - 3.0 * sc, ly - 1.0 * sc, lx + tw + 4.0 * sc, ly + 18.0 * sc, 3.0 * sc, (0.05, 0.04, 0.03, 0.72));
+                    r.text(&p.label, Font::Small, lx, ly, tw + 2.0, (0.97, 0.92, 0.8, 1.0));
+                }
+            } else if layer_id == Some("player_spawns") {
+                // Point d'apparition des joueurs : grand rond bien contrasté.
+                let sr = rad * 1.05;
+                r.fill_circle(x, y, sr + 3.0 * sc, (0.0, 0.0, 0.0, 0.7));
+                r.fill_circle(x, y, sr, c);
+                r.stroke_circle(x, y, sr, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
+                r.stroke_circle(x, y, sr * 0.45, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
+            } else if p.layer.is_some() {
                 // Point de calque : plus petit et plus discret que les objectifs.
                 let lr = rr * 0.62;
                 if p.diamond {
@@ -1204,9 +1259,6 @@ impl App {
                 r.fill_rrect(x - hr - 2.0 * sc, y - hr - 2.0 * sc, x + hr + 2.0 * sc, y + hr + 2.0 * sc, 3.0 * sc, (0.0, 0.0, 0.0, 0.55));
                 r.fill_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, c);
                 r.stroke_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, 1.4 * sc, (1.0, 1.0, 1.0, if p.locked { 0.5 } else { 0.95 }));
-            } else if p.place {
-                r.diamond(x, y, rr * 1.3, 4.0 * sc, (0.0, 0.0, 0.0, 0.75));
-                r.diamond(x, y, rr * 1.3, 2.0 * sc, c);
             } else if p.done {
                 r.fill_circle(x, y, rr * 0.8, (0.35, 0.35, 0.35, 0.65));
                 r.stroke_circle(x, y, rr * 0.8, 1.5 * sc, (0.9, 0.9, 0.9, 0.7), false);
@@ -1220,12 +1272,21 @@ impl App {
                 }
             }
         }
-        // Légende à droite du carré par défaut.
-        let right = (m.sq.x0 + m.sq.side) as f32 + 24.0 * sc;
-        let lw = (gw as f32 - right - 16.0 * sc).min(if self.cfg.panel_collapsed { 270.0 } else { 430.0 } * sc);
+        // Panneau : à droite de la carte par défaut, ou là où l'utilisateur l'a déplacé (position mémorisée en
+        // fractions de la fenêtre, pour rester valable à une autre résolution).
+        let max_w = if self.cfg.panel_collapsed { 300.0 } else { 430.0 } * sc;
+        let (right, top, lw) = match self.cfg.panel_pos {
+            Some((fx, fy)) => {
+                let x = (fx * gw as f32).clamp(0.0, (gw as f32 - 200.0 * sc).max(0.0));
+                (x, (fy * gh as f32).clamp(0.0, gh as f32 - 60.0 * sc), max_w.min(gw as f32 - x - 4.0))
+            }
+            None => {
+                let x = (m.sq.x0 + m.sq.side) as f32 + 24.0 * sc;
+                (x, 60.0 * sc, (gw as f32 - x - 16.0 * sc).min(max_w))
+            }
+        };
         let mut legend_rect = None;
         if lw > 180.0 * sc {
-            let top = 60.0 * sc;
             let view = panel::View {
                 s: self.s,
                 legend: &m.legend,
@@ -1235,9 +1296,10 @@ impl App {
                 min_chance: self.cfg.min_chance,
                 lang_label,
                 collapsed: self.cfg.panel_collapsed,
+                opacity: self.cfg.panel_opacity.clamp(20, 100) as f32 / 100.0,
             };
             let _ = self.prenderer.set_font_scale(sc);
-            let (h, _) = panel::layout(&self.prenderer, &view, lw.floor(), gh as f32 - 120.0 * sc, sc, None, false);
+            let (h, _) = panel::layout(&self.prenderer, &view, lw.floor(), (gh as f32 - top - 20.0 * sc).max(100.0), sc, None, false);
             let (pw, ph) = (lw.floor() as i32, h.ceil() as i32);
             if self.prenderer.begin(pw, ph) {
                 let (_, hits) = panel::layout(&self.prenderer, &view, pw as f32, ph as f32, sc, self.panel_hover, true);
@@ -1375,6 +1437,7 @@ impl App {
                 min_chance: self.cfg.min_chance,
                 auto_update: self.cfg.auto_update,
                 theme: &self.cfg.theme,
+                panel_opacity: self.cfg.panel_opacity,
                 auto_lang: auto_lang.clone(),
             },
         );
@@ -1484,6 +1547,7 @@ impl App {
         }
         self.cfg.auto_update = v.auto_update;
         self.cfg.theme = v.theme.clone();
+        self.cfg.panel_opacity = v.panel_opacity;
         if v.autostart != self.cfg.autostart {
             config::set_autostart(v.autostart);
         }
@@ -1704,7 +1768,14 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 dwHoverTime: 0,
             };
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut tme);
-            with_app(|a| a.panel_mouse(x, y));
+            let (sx, sy) = cursor();
+            with_app(|a| {
+                if a.panel_grab.is_some() {
+                    a.panel_drag_to(sx, sy);
+                } else {
+                    a.panel_mouse(x, y);
+                }
+            });
             LRESULT(0)
         }
         0x02A3 => {
@@ -1717,10 +1788,34 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             let _ = SetCursor(LoadCursorW(None, if over { IDC_HAND } else { IDC_ARROW }).unwrap_or_default());
             LRESULT(1)
         }
-        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MOUSEWHEEL => LRESULT(0),
+        WM_LBUTTONDOWN => {
+            let (x, y) = pos();
+            if with_app(|a| a.panel_down(x, y)).unwrap_or(false) {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDBLCLK => {
+            // Double-clic sur la poignée : retour à la position par défaut.
+            let (x, y) = pos();
+            with_app(|a| {
+                if a.panel_hits.iter().any(|h| h.contains(x, y) && h.action == panel::Action::Move) {
+                    a.cfg.panel_pos = None;
+                    a.cfg.save();
+                    a.dirty = true;
+                }
+            });
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MOUSEWHEEL => LRESULT(0),
         WM_LBUTTONUP => {
             let (x, y) = pos();
-            with_app(|a| a.panel_click(x, y));
+            let moved = with_app(|a| a.panel_up()).unwrap_or(false);
+            if moved {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            } else {
+                with_app(|a| a.panel_click(x, y));
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1791,7 +1886,7 @@ fn main() {
         });
         let main = CreateWindowExW(WINDOW_EX_STYLE(0), main_class, w!("Hunger Overlay"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, inst, None).unwrap();
         let panel_class = w!("HungerOverlayPanel");
-        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(panel_proc), hInstance: inst.into(), lpszClassName: panel_class, ..Default::default() });
+        RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(panel_proc), hInstance: inst.into(), lpszClassName: panel_class, ..Default::default() });
         // Pas de WS_EX_TRANSPARENT : ce panneau reçoit les clics (sans s'activer).
         let panel = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1855,6 +1950,7 @@ fn main() {
             panel_hits: vec![],
             panel_hover: None,
             panel_shown: false,
+            panel_grab: None,
             cfg,
             s,
             shared,
