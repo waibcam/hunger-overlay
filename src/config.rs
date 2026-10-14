@@ -35,6 +35,10 @@ pub struct Config {
     /// Le jeu zoome-t-il d'un cran par ÉVÉNEMENT de molette (molettes à défilement fin) plutôt que par
     /// tranche de 120 ? Appris automatiquement par les recalages (None = pas encore su).
     pub wheel_per_event: Option<bool>,
+    /// Mises à jour : installées automatiquement (sinon simple notification).
+    pub auto_update: bool,
+    /// Thème de la fenêtre de paramètres : "auto" (celui de Windows), "light", "dark".
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -53,6 +57,8 @@ impl Default for Config {
             hidden_quests: vec![],
             panel_collapsed: false,
             wheel_per_event: None,
+            auto_update: true,
+            theme: "auto".into(),
         }
     }
 }

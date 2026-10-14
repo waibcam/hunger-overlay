@@ -44,6 +44,8 @@ pub struct Renderer {
     dash: ID2D1StrokeStyle,
     fonts: Vec<IDWriteTextFormat>,
     font_scale: f32,
+    /// Tailles de base (px à l'échelle 1) : titre, gras, texte, petit.
+    base: [f32; 4],
     mem: HDC,
     dib: HBITMAP,
     old: HGDIOBJ,
@@ -96,6 +98,7 @@ impl Renderer {
                 dash,
                 fonts: vec![],
                 font_scale: 0.0,
+                base: [18.0, 18.0, 16.5, 14.5],
                 mem,
                 dib: HBITMAP::default(),
                 old: HGDIOBJ::default(),
@@ -132,13 +135,28 @@ impl Renderer {
                 Ok(f)
             }
         };
+        let b = self.base;
         self.fonts = vec![
-            mk(DWRITE_FONT_WEIGHT_BOLD, 18.0, false)?,
-            mk(DWRITE_FONT_WEIGHT_SEMI_BOLD, 18.0, true)?,
-            mk(DWRITE_FONT_WEIGHT_NORMAL, 16.5, true)?,
-            mk(DWRITE_FONT_WEIGHT_NORMAL, 14.5, true)?,
+            mk(DWRITE_FONT_WEIGHT_BOLD, b[0], false)?,
+            mk(DWRITE_FONT_WEIGHT_SEMI_BOLD, b[1], true)?,
+            mk(DWRITE_FONT_WEIGHT_NORMAL, b[2], true)?,
+            mk(DWRITE_FONT_WEIGHT_NORMAL, b[3], true)?,
         ];
         Ok(())
+    }
+
+    /// Change les tailles de base des polices (interface de type application : texte 14 px).
+    pub fn set_base_sizes(&mut self, b: [f32; 4]) {
+        self.base = b;
+        self.font_scale = 0.0;
+    }
+
+    /// Termine l'image et la copie dans un contexte de fenêtre classique (WM_PAINT).
+    pub fn present_dc(&mut self, hdc: HDC) {
+        unsafe {
+            let _ = self.rt.EndDraw(None, None);
+            let _ = windows::Win32::Graphics::Gdi::BitBlt(hdc, 0, 0, self.w, self.h, self.mem, 0, 0, windows::Win32::Graphics::Gdi::SRCCOPY);
+        }
     }
 
     fn font(&self, f: Font) -> &IDWriteTextFormat {

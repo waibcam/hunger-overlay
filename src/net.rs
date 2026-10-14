@@ -29,8 +29,8 @@ pub enum Req {
     Configure { key: Option<String>, base_url: String, locale: String },
     /// Tester une clé depuis les paramètres, sans la conserver.
     Validate(String),
-    /// Vérifier s'il existe une nouvelle version (une fois par jour).
-    CheckUpdate,
+    /// Vérifier s'il existe une nouvelle version ; `install` = la télécharger (et la vérifier) pour l'installer.
+    CheckUpdate { install: bool },
 }
 
 #[derive(Default)]
@@ -44,6 +44,8 @@ pub struct Shared {
     pub validate: Option<Result<String, Status>>,
     /// Nouvelle version disponible : (version, url de la page).
     pub update: Option<(String, String)>,
+    /// Nouvelle version téléchargée et vérifiée, prête à installer : (version, fichier).
+    pub update_ready: Option<(String, std::path::PathBuf)>,
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -174,7 +176,7 @@ impl Worker {
                     self.shared.lock().unwrap().validate = Some(r);
                     (self.notify)();
                 }
-                Req::CheckUpdate => self.check_update(),
+                Req::CheckUpdate { install } => self.check_update(install),
             }
         }
     }
@@ -364,21 +366,36 @@ impl Worker {
         }
     }
 
-    fn check_update(&mut self) {
-        if now_secs().saturating_sub(self.etags.last_update_check) < 86_400 {
-            return;
-        }
+    /// Lit `app.json` (fichier statique, sans clé). Si une version plus récente existe : notification, et si
+    /// `install`, téléchargement + vérification SHA-256 (l'interface l'installe dès que la carte n'est pas affichée).
+    fn check_update(&mut self, install: bool) {
         self.etags.last_update_check = now_secs();
         self.save_etags();
         let url = format!("{}/api/overlay/v1/app.json", self.base);
         let Ok(resp) = self.agent.get(&url).call() else { return };
         let Some(v) = resp.into_string().ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()) else { return };
         let latest = v["latest"].as_str().unwrap_or("").to_string();
-        if version_gt(&latest, env!("CARGO_PKG_VERSION")) {
-            let page = v["notes_url"].as_str().unwrap_or("https://hunger-companion.com/overlay").to_string();
-            logf!("mise à jour disponible : {latest}");
-            self.shared.lock().unwrap().update = Some((latest, page));
-            (self.notify)();
+        if !version_gt(&latest, env!("CARGO_PKG_VERSION")) {
+            return;
+        }
+        let page = v["notes_url"].as_str().unwrap_or("https://hunger-companion.com/overlay").to_string();
+        logf!("mise à jour disponible : {latest}");
+        self.shared.lock().unwrap().update = Some((latest.clone(), page));
+        (self.notify)();
+        let (Some(exe), Some(sha)) = (v["url"].as_str(), v["sha256"].as_str()) else { return };
+        if !install || !exe.ends_with(".exe") || sha.len() != 64 {
+            return;
+        }
+        if self.shared.lock().unwrap().update_ready.as_ref().map(|u| u.0 == latest).unwrap_or(false) {
+            return;
+        }
+        match crate::update::download(&self.agent, exe, sha, &latest) {
+            Ok(path) => {
+                logf!("mise à jour {latest} téléchargée et vérifiée (SHA-256 OK)");
+                self.shared.lock().unwrap().update_ready = Some((latest, path));
+                (self.notify)();
+            }
+            Err(e) => logf!("mise à jour {latest} : {e}"),
         }
     }
 }

@@ -20,14 +20,11 @@ for m in ('Map01', 'Map02', 'Map03'):
     np.asarray(big, dtype=np.uint8).tofile(os.path.join(here, f'ref512_{m}.bin'))
     print(m, small.size, big.size)
 
-# icône : épingle de carte rouge sur parchemin
-sizes = [16, 24, 32, 48, 64, 256]
+# icône : celle du site Hunger Companion (assets/icon_source.png, 512x512), coins arrondis
+src = Image.open(os.path.join(here, 'icon_source.png')).convert('RGBA').resize((256, 256), Image.LANCZOS)
+mask = Image.new('L', (256, 256), 0)
+ImageDraw.Draw(mask).rounded_rectangle((0, 0, 255, 255), 48, fill=255)
 big = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
-d = ImageDraw.Draw(big)
-d.rounded_rectangle((8, 8, 248, 248), 40, fill=(232, 222, 200, 255), outline=(60, 50, 40, 255), width=10)
-d.ellipse((78, 40, 178, 140), fill=(196, 40, 40, 255), outline=(40, 20, 20, 255), width=8)
-d.polygon([(90, 118), (166, 118), (128, 216)], fill=(196, 40, 40, 255))
-d.line([(90, 118), (128, 216), (166, 118)], fill=(40, 20, 20, 255), width=8)
-d.ellipse((110, 72, 146, 108), fill=(240, 235, 220, 255))
-big.save(os.path.join(here, 'icon.ico'), sizes=[(s, s) for s in sizes])
+big.paste(src, (0, 0), mask)
+big.save(os.path.join(here, 'icon.ico'), sizes=[(s, s) for s in (16, 20, 24, 32, 40, 48, 64, 256)])
 print('icon ok')

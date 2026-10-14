@@ -19,6 +19,7 @@ mod render;
 mod resync;
 mod settings;
 mod tray;
+mod update;
 
 use config::Config;
 use detect::{PanelSig, Square};
@@ -41,7 +42,6 @@ use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK,
     RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -171,6 +171,9 @@ struct App {
     rs_out: resync::ResSlot,
     rs_job: Option<JobInfo>,
     rs_next_id: u64,
+    /// Installation demandée depuis le menu (en mode « me prévenir »).
+    install_requested: bool,
+    next_update_check: Instant,
 }
 
 /// Mémorise sur disque la dernière carte vue (pour cette taille d'écran) : carte, carré par défaut, panneau d'aide.
@@ -378,7 +381,7 @@ impl App {
             }
             self.capture_key = false;
             let name = settings::key_name(self.settings.as_ref().map(|s| s.vk).unwrap_or(self.cfg.map_vk));
-            if let Some(st) = &self.settings {
+            if let Some(st) = self.settings.as_mut() {
                 st.set_mapkey_text(&name);
             }
             return;
@@ -488,6 +491,7 @@ impl App {
             }
         }
         self.sync_data();
+        self.maybe_install_update(now);
         let state = std::mem::replace(&mut self.state, MapState::Closed { next_probe: now, fast_until: now });
         self.state = match state {
             MapState::Closed { next_probe, fast_until } => {
@@ -868,7 +872,7 @@ impl App {
             tray::set_tip(self.main, &tip);
         }
         if let Some(r) = &sh.validate {
-            if let Some(set) = &self.settings {
+            if let Some(set) = self.settings.as_mut() {
                 let t = match r {
                     Ok(user) => format!("✔ {} {}", self.s.st_valid, user),
                     Err(e) => format!("✖ {}", status_text(self.s, Some(e))),
@@ -1153,7 +1157,7 @@ impl App {
     // ---------- Paramètres ----------
 
     fn open_settings(&mut self) {
-        if let Some(s) = &self.settings {
+        if let Some(s) = self.settings.as_mut() {
             unsafe {
                 let _ = SetForegroundWindow(s.hwnd);
             }
@@ -1161,6 +1165,10 @@ impl App {
         }
         self.shared.lock().unwrap().validate = None;
         let key = self.cfg.api_key().unwrap_or_default();
+        let auto_lang = {
+            let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
+            format!("Auto ({})", i18n::effective("", account.as_deref()).to_uppercase())
+        };
         self.settings = settings::Settings::open(
             self.s,
             settings::Init {
@@ -1171,6 +1179,9 @@ impl App {
                 autostart: self.cfg.autostart,
                 locale: &self.cfg.locale,
                 min_chance: self.cfg.min_chance,
+                auto_update: self.cfg.auto_update,
+                theme: &self.cfg.theme,
+                auto_lang: auto_lang.clone(),
             },
         );
     }
@@ -1178,7 +1189,7 @@ impl App {
     fn settings_command(&mut self, id: i32) {
         match id {
             settings::ID_CHANCE => {
-                if let Some(s) = &self.settings {
+                if let Some(s) = self.settings.as_mut() {
                     s.chance_moved();
                 }
             }
@@ -1189,12 +1200,12 @@ impl App {
             }
             settings::ID_MAPKEY => {
                 self.capture_key = true;
-                if let Some(s) = &self.settings {
+                if let Some(s) = self.settings.as_mut() {
                     s.set_mapkey_text(self.s.press_key);
                 }
             }
             settings::ID_TEST => {
-                if let Some(s) = &self.settings {
+                if let Some(s) = self.settings.as_mut() {
                     let k = s.key_text();
                     if !net::key_format_ok(&k) {
                         s.set_status(self.s.st_bad_format);
@@ -1215,7 +1226,7 @@ impl App {
                         s.close();
                     }
                     self.capture_key = false;
-                } else if let Some(s) = &self.settings {
+                } else if let Some(s) = self.settings.as_mut() {
                     s.set_status(self.s.st_applied);
                 }
             }
@@ -1232,12 +1243,39 @@ impl App {
 }
 
 impl App {
+    /// Installe une mise à jour téléchargée, jamais pendant que la carte est affichée ; vérifie toutes les 6 h.
+    fn maybe_install_update(&mut self, now: Instant) {
+        if now >= self.next_update_check {
+            self.next_update_check = now + Duration::from_secs(6 * 3600);
+            let _ = self.net.send(Req::CheckUpdate { install: self.cfg.auto_update });
+        }
+        if matches!(self.state, MapState::Open(_)) || self.settings.is_some() {
+            return;
+        }
+        if !(self.cfg.auto_update || self.install_requested) {
+            return;
+        }
+        let ready = self.shared.lock().unwrap().update_ready.take();
+        let Some((version, path)) = ready else { return };
+        logf!("installation de la version {version}");
+        tray::remove(self.main);
+        match update::install_and_restart(&path) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                logf!("mise à jour impossible : {e}");
+                tray::add(self.main, WM_TRAY, "Hunger Overlay");
+                tray::balloon(self.main, "Hunger Overlay", self.s.update_available);
+            }
+        }
+    }
+
     /// Applique les valeurs de la fenêtre de paramètres (sans la fermer). Renvoie false si la clé est invalide.
     fn apply_settings(&mut self) -> bool {
-        let Some(s) = &self.settings else { return false };
+        let msg = self.s.st_bad_format;
+        let Some(s) = self.settings.as_mut() else { return false };
         let v = s.values();
         if !v.key.is_empty() && !net::key_format_ok(&v.key) {
-            s.set_status(self.s.st_bad_format);
+            s.set_status(msg);
             return false;
         }
         let net_changed = self.cfg.api_key().unwrap_or_default() != v.key || self.cfg.locale != v.locale;
@@ -1247,6 +1285,11 @@ impl App {
         self.cfg.capture_visible = v.capture_visible;
         self.cfg.locale = v.locale;
         self.cfg.min_chance = v.min_chance;
+        if v.auto_update && !self.cfg.auto_update {
+            let _ = self.net.send(Req::CheckUpdate { install: true });
+        }
+        self.cfg.auto_update = v.auto_update;
+        self.cfg.theme = v.theme.clone();
         if v.autostart != self.cfg.autostart {
             config::set_autostart(v.autostart);
         }
@@ -1307,6 +1350,21 @@ fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[Stri
         r.text(l, Font::Text, bx + pad, cy, maxw, (0.93, 0.91, 0.86, 1.0));
         cy += lh + 2.0 * sc;
     }
+}
+
+/// Accès à la fenêtre de paramètres ouverte (depuis sa procédure de fenêtre).
+pub fn with_settings<R>(f: impl FnOnce(&mut settings::Settings) -> R) -> Option<R> {
+    with_app(|a| a.settings.as_mut().map(f)).flatten()
+}
+
+/// Clic dans la fenêtre de paramètres : géré par la fenêtre, puis par l'appli pour les actions globales.
+pub fn on_settings_click(x: f32, y: f32, down: bool) {
+    with_app(|a| {
+        let act = a.settings.as_mut().and_then(|s| s.click(x, y, down));
+        if let Some(id) = act {
+            a.settings_command(id);
+        }
+    });
 }
 
 /// Appelé par la fenêtre de paramètres.
@@ -1381,11 +1439,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     });
                 }
                 tray::ID_UPDATE => {
-                    let url = with_app(|a| a.shared.lock().unwrap().update.clone().map(|u| u.1)).flatten();
-                    if let Some(u) = url {
-                        let w = wide(&u);
-                        ShellExecuteW(None, w!("open"), PCWSTR(w.as_ptr()), None, None, SW_SHOWNORMAL);
-                    }
+                    with_app(|a| {
+                        a.install_requested = true;
+                        let _ = a.net.send(Req::CheckUpdate { install: true });
+                    });
                 }
                 tray::ID_QUIT => {
                     let _ = DestroyWindow(hwnd);
@@ -1454,18 +1511,47 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     }
 }
 
+static SINGLE_INSTANCE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Libère le verrou « une seule instance » (avant de lancer la version mise à jour).
+pub fn release_single_instance() {
+    let h = SINGLE_INSTANCE.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if h != 0 {
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(windows::Win32::Foundation::HANDLE(h as _));
+            let _ = CloseHandle(windows::Win32::Foundation::HANDLE(h as _));
+        }
+    }
+}
+
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let s = i18n::t();
-        let _mutex = CreateMutexW(None, true, w!("Local\\HungerOverlay.SingleInstance"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            let t = wide(s.already_running);
-            MessageBoxW(None, PCWSTR(t.as_ptr()), w!("Hunger Overlay"), MB_ICONINFORMATION);
-            return;
+        let updated = std::env::args().any(|a| a == "--updated");
+        // Après une mise à jour, l'ancienne instance peut mettre un instant à se fermer : on attend un peu.
+        let mut tries = if updated { 50 } else { 1 };
+        loop {
+            let m = CreateMutexW(None, true, w!("Local\\HungerOverlay.SingleInstance"));
+            let exists = GetLastError() == ERROR_ALREADY_EXISTS;
+            if let Ok(h) = m {
+                if !exists {
+                    SINGLE_INSTANCE.store(h.0 as isize, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                let _ = CloseHandle(h);
+            }
+            tries -= 1;
+            if tries == 0 {
+                let t = wide(s.already_running);
+                MessageBoxW(None, PCWSTR(t.as_ptr()), w!("Hunger Overlay"), MB_ICONINFORMATION);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         log::init();
-        logf!("démarrage v{}", env!("CARGO_PKG_VERSION"));
+        logf!("démarrage v{}{}", env!("CARGO_PKG_VERSION"), if updated { " (après mise à jour)" } else { "" });
+        update::cleanup();
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
 
         let inst = GetModuleHandleW(None).unwrap();
@@ -1572,13 +1658,19 @@ fn main() {
             rs_out,
             rs_job: None,
             rs_next_id: 1,
+            install_requested: false,
+            next_update_check: Instant::now() + Duration::from_secs(6 * 3600),
         };
         app.apply_capture_affinity();
         app.configure_net();
-        let _ = app.net.send(Req::CheckUpdate);
+        let _ = app.net.send(Req::CheckUpdate { install: app.cfg.auto_update });
         let no_key = app.cfg.api_key().is_none();
         APP.with(|a| *a.borrow_mut() = Some(app));
         tray::add(main, WM_TRAY, "Hunger Overlay");
+        if updated {
+            let t = format!("{} {}.", i18n::t().updated_to, env!("CARGO_PKG_VERSION"));
+            tray::balloon(main, "Hunger Overlay", &t);
+        }
         if no_key {
             with_app(|a| a.open_settings());
         } else {
