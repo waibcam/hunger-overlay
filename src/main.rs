@@ -88,6 +88,11 @@ struct OpenMap {
     motion: bool,
     /// Recalage large en cours (retour de focus / des menus) : overlay masqué jusqu'au résultat.
     wide_pending: bool,
+    /// Position incertaine (un recalage a échoué) : on masque les points et on relance une recherche complète.
+    uncertain: bool,
+    /// Dernier niveau de zoom confirmé par l'image (le jeu peut ignorer des crans de molette trop rapprochés :
+    /// le vrai niveau est alors entre celui-ci et celui calculé).
+    n_sync: i32,
     /// Dernière action souris (molette / glisser) : le recalage périodique attend que la carte soit immobile.
     last_input: Instant,
     /// Recalage visuel programmé ; `true` = recherche large (retour de focus), overlay masqué en attendant.
@@ -124,6 +129,8 @@ enum Resync {
     Motion,
     /// Contrôle périodique au repos.
     Idle,
+    /// Recherche complète (tous niveaux, toutes positions) après un recalage raté.
+    Global,
 }
 
 enum MapState {
@@ -438,29 +445,41 @@ impl App {
         }
     }
 
-    fn on_mouse(&mut self, flags: u16, data: u16) {
+    /// Événement souris brut. `pos` = position du curseur AU MOMENT de l'événement (GetMessagePos), et non
+    /// au moment du traitement : un glisser très rapide n'est ainsi jamais perdu.
+    fn on_mouse(&mut self, flags: u16, data: u16, pos: (i32, i32)) {
         const LEFT_DOWN: u16 = 0x0001;
         const LEFT_UP: u16 = 0x0002;
         const WHEEL: u16 = 0x0400;
-        // Le relâchement termine TOUJOURS un glisser, même si le jeu a perdu le focus entre-temps
-        // (sinon chaque mouvement de souris hors du jeu décalait les marqueurs).
-        if flags & LEFT_UP != 0 {
-            if let MapState::Open(m) = &mut self.state {
-                if m.drag.take().is_some() {
+        // Glisser en cours : on suit chaque déplacement jusqu'au relâchement inclus.
+        if let MapState::Open(m) = &mut self.state {
+            if let Some((lx, ly)) = m.drag {
+                if pos != (lx, ly) {
+                    let lim = m.zoom * m.sq.side / 2.0;
+                    m.off.0 = (m.off.0 + (pos.0 - lx) as f64).clamp(-lim, lim);
+                    m.off.1 = (m.off.1 + (pos.1 - ly) as f64).clamp(-lim, lim);
+                    m.drag = Some(pos);
                     m.last_input = Instant::now();
+                    self.dirty = true;
                 }
             }
+            // Le relâchement termine TOUJOURS un glisser, même si le jeu a perdu le focus entre-temps.
+            if flags & LEFT_UP != 0 && m.drag.take().is_some() {
+                m.last_input = Instant::now();
+            }
         }
-        if self.game_fg().is_none() {
+        if flags == 0 || self.game_fg().is_none() {
             return;
         }
         // Clic ou molette sur NOTRE panneau : le jeu ne les reçoit pas, la carte ne bouge donc pas.
-        let (sx, sy) = cursor();
+        let (sx, sy) = pos;
         if self.over_panel(sx, sy) {
             return;
         }
         let (gx, gy, gw, gh) = self.client;
-        let per_event = self.cfg.wheel_per_event == Some(true);
+        // Mesuré en jeu (2026-10-14) : un cran de zoom par ÉVÉNEMENT de molette, quelle que soit sa taille.
+        // Le modèle « par 120 » ne reste utilisé que si les recalages l'ont explicitement appris.
+        let per_event = self.cfg.wheel_per_event != Some(false);
         let MapState::Open(m) = &mut self.state else { return };
         if m.closing_check.is_some() {
             return;
@@ -484,7 +503,7 @@ impl App {
             m.n = if per_event { m.n_b } else { m.n_a };
         }
         if flags & LEFT_DOWN != 0 {
-            let (cx, cy) = cursor();
+            let (cx, cy) = pos;
             let (lx, ly) = ((cx - gx) as f64, (cy - gy) as f64);
             let (px0, py0, px1, py1) = detect::panel_rect(gh as f64);
             let on_panel = lx >= px0 && lx <= px1 && ly >= py0 && ly <= py1;
@@ -662,16 +681,8 @@ impl App {
             m.drag = None;
             m.last_input = now;
         }
-        if let Some((lx, ly)) = m.drag {
-            m.last_input = now;
-            let (cx, cy) = cursor();
-            if (cx, cy) != (lx, ly) {
-                let lim = m.zoom * m.sq.side / 2.0;
-                m.off.0 = (m.off.0 + (cx - lx) as f64).clamp(-lim, lim);
-                m.off.1 = (m.off.1 + (cy - ly) as f64).clamp(-lim, lim);
-                m.drag = Some((cx, cy));
-                self.dirty = true;
-            }
+        if m.drag.is_some() {
+            m.last_input = now; // le déplacement lui-même est suivi événement par événement (on_mouse)
         }
         if !fg {
             return true;
@@ -739,6 +750,8 @@ impl App {
                 Resync::Wide
             } else if m.motion {
                 Resync::Motion
+            } else if m.uncertain {
+                Resync::Global
             } else {
                 Resync::Idle
             };
@@ -798,6 +811,8 @@ impl App {
             n_b: 0,
             motion: false,
             wide_pending: false,
+            uncertain: false,
+            n_sync: 0,
             last_input: now,
             // Premier recalage dès l'ouverture (corrige une détection du carré à quelques pixels près).
             resync_at: Some((now + Duration::from_millis(320), false)),
@@ -988,13 +1003,16 @@ impl App {
             Resync::Wide => (2, 640.0, resync::Kind::LocalThenGlobal),
             Resync::Motion => (2, 400.0, resync::Kind::Local),
             Resync::Idle => (1, 160.0, resync::Kind::Local),
+            Resync::Global => (0, 0.0, resync::Kind::Global),
         };
-        let mut zooms: Vec<i32> = (m.n - span..=m.n + span).chain([m.n_a, m.n_b]).filter(|n| (0..=ZOOM_MAX_N).contains(n)).collect();
+        let (lo, hi) = (m.n.min(m.n_sync).min(m.n_a).min(m.n_b), m.n.max(m.n_sync).max(m.n_a).max(m.n_b));
+        let mut zooms: Vec<i32> = (lo - span.min(1)..=hi + span.min(1)).chain(m.n - span..=m.n + span).filter(|n| (0..=ZOOM_MAX_N).contains(n)).collect();
         zooms.sort();
         zooms.dedup();
         let id = self.rs_next_id;
         self.rs_next_id += 1;
-        let job = resync::Job { id, g, masks: self.masks(), map: m.map_idx, side0: m.sq.side, center: (cx, cy), pred, n_pred: m.n, zooms, radius, kind };
+        let center = (m.sq.x0 + m.sq.side / 2.0, m.sq.y0 + m.sq.side / 2.0);
+        let job = resync::Job { id, g, masks: self.masks(), map: m.map_idx, side0: m.sq.side, center, pred, n_pred: m.n, zooms, radius, kind };
         if self.rs_tx.send(job).is_err() {
             return false;
         }
@@ -1025,7 +1043,7 @@ impl App {
         if wide {
             m.wide_pending = false;
         }
-        if info.map_idx != m.map_idx {
+        if info.map_idx != m.map_idx || res.map != m.map_idx {
             return None;
         }
         // La carte a bougé depuis la capture : résultat périmé (un nouveau recalage suivra le mouvement).
@@ -1035,9 +1053,26 @@ impl App {
             }
             return None;
         }
+        // Recalage raté (score trop faible) : position incertaine → points masqués, recherche complète au repos.
+        let weak = res.found.as_ref().map(|f| f.score.max(f.score_pred) < 0.5).unwrap_or(true);
+        if weak && !wide {
+            if !m.uncertain {
+                logf!("position incertaine : points masqués, recherche complète");
+            }
+            m.uncertain = true;
+            m.next_idle_resync = now + Duration::from_millis(if info.mode == Resync::Global { 2500 } else { 300 });
+            self.dirty = true;
+        }
         let Some(f) = res.found else {
             return if wide { Some(false) } else { None };
         };
+        if f.score >= 0.6 && m.uncertain {
+            m.uncertain = false;
+            self.dirty = true;
+        }
+        if f.score >= 0.6 {
+            m.n_sync = f.n;
+        }
         let side_p = (1.0 + 0.5 * info.n as f64) * m.sq.side;
         let side_f = (1.0 + 0.5 * f.n as f64) * m.sq.side;
         let shift = ((f.x0 + side_f / 2.0 - (info.pred.0 + side_p / 2.0)).powi(2) + (f.y0 + side_f / 2.0 - (info.pred.1 + side_p / 2.0)).powi(2)).sqrt();
@@ -1130,9 +1165,13 @@ impl App {
         };
         let r = &self.renderer;
         let rad = self.marker_r() as f32;
+        let hide_points = m.uncertain;
         let (mx0, my0) = m.project(0.0, 0.0);
         let (mx1, my1) = m.project(1.0, 1.0);
         for (i, p) in m.points.iter().enumerate() {
+            if hide_points {
+                break;
+            }
             let (x, y) = m.project(p.u, p.v);
             let (x, y) = (x as f32, y as f32);
             if x < -20.0 || y < -20.0 || x > gw as f32 + 20.0 || y > gh as f32 + 20.0 {
@@ -1207,7 +1246,7 @@ impl App {
             }
             legend_rect = Some((right, top, right + pw as f32, top + ph as f32));
         }
-        if let Some(i) = self.hover {
+        if let Some(i) = self.hover.filter(|_| !hide_points) {
             if let Some(p) = m.points.get(i) {
                 let (x, y) = m.project(p.u, p.v);
                 let lq = m.legend.get(p.quest);
@@ -1575,9 +1614,9 @@ fn handle_raw_input(lp: LPARAM) {
             let m = ri.data.mouse;
             let flags = m.Anonymous.Anonymous.usButtonFlags;
             let data = m.Anonymous.Anonymous.usButtonData;
-            if flags != 0 {
-                with_app(|a| a.on_mouse(flags, data));
-            }
+            let mp = GetMessagePos();
+            let pos = ((mp & 0xffff) as u16 as i16 as i32, ((mp >> 16) & 0xffff) as u16 as i16 as i32);
+            with_app(|a| a.on_mouse(flags, data, pos));
         }
     }
 }
