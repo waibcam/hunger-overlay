@@ -837,36 +837,17 @@ impl App {
                     let _ = self.net.send(Req::Validate(k));
                 }
             }
-            settings::ID_SAVE => {
-                if let Some(s) = &self.settings {
-                    let k = s.key_text();
-                    if !k.is_empty() && !net::key_format_ok(&k) {
-                        s.set_status(self.s.st_bad_format);
-                        return;
-                    }
+            settings::ID_SAVE | settings::ID_APPLY => {
+                if !self.apply_settings() {
+                    return;
                 }
-                if let Some(s) = self.settings.take() {
-                    let v = s.values();
-                    self.cfg.set_api_key(&v.key);
-                    self.cfg.map_vk = v.vk;
-                    self.cfg.show_done = v.show_done;
-                    self.cfg.capture_visible = v.capture_visible;
-                    self.cfg.locale = v.locale;
-                    self.cfg.min_chance = v.min_chance;
-                    if v.autostart != self.cfg.autostart {
-                        config::set_autostart(v.autostart);
+                if id == settings::ID_SAVE {
+                    if let Some(s) = self.settings.take() {
+                        s.close();
                     }
-                    self.cfg.autostart = v.autostart;
-                    self.cfg.save();
-                    s.close();
                     self.capture_key = false;
-                    self.apply_capture_affinity();
-                    self.configure_net();
-                    let _ = self.net.send(Req::Refresh { force: true });
-                    if let MapState::Open(m) = &mut self.state {
-                        m.data_version = u64::MAX;
-                    }
-                    logf!("paramètres enregistrés (touche 0x{:02X})", self.cfg.map_vk);
+                } else if let Some(s) = &self.settings {
+                    s.set_status(self.s.st_applied);
                 }
             }
             settings::ID_CANCEL => {
@@ -878,6 +859,42 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+impl App {
+    /// Applique les valeurs de la fenêtre de paramètres (sans la fermer). Renvoie false si la clé est invalide.
+    fn apply_settings(&mut self) -> bool {
+        let Some(s) = &self.settings else { return false };
+        let v = s.values();
+        if !v.key.is_empty() && !net::key_format_ok(&v.key) {
+            s.set_status(self.s.st_bad_format);
+            return false;
+        }
+        let net_changed = self.cfg.api_key().unwrap_or_default() != v.key || self.cfg.locale != v.locale;
+        self.cfg.set_api_key(&v.key);
+        self.cfg.map_vk = v.vk;
+        self.cfg.show_done = v.show_done;
+        self.cfg.capture_visible = v.capture_visible;
+        self.cfg.locale = v.locale;
+        self.cfg.min_chance = v.min_chance;
+        if v.autostart != self.cfg.autostart {
+            config::set_autostart(v.autostart);
+        }
+        self.cfg.autostart = v.autostart;
+        self.cfg.save();
+        self.apply_capture_affinity();
+        if net_changed {
+            // Nouvelle clé ou langue : on recharge (le plafond horaire reste appliqué par le thread réseau).
+            self.configure_net();
+            let _ = self.net.send(Req::Refresh { force: true });
+        }
+        if let MapState::Open(m) = &mut self.state {
+            m.data_version = u64::MAX; // reconstruit les points (filtre de chance, terminés…)
+        }
+        self.dirty = true;
+        logf!("paramètres appliqués (touche 0x{:02X}, chance min {} %)", self.cfg.map_vk, self.cfg.min_chance);
+        true
     }
 }
 

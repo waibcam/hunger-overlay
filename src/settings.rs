@@ -27,6 +27,7 @@ pub const ID_SAVE: i32 = 208;
 pub const ID_CANCEL: i32 = 209;
 pub const ID_LANG: i32 = 210;
 pub const ID_CHANCE: i32 = 211;
+pub const ID_APPLY: i32 = 212;
 
 const TBM_GETPOS: u32 = 0x0400;
 const TBM_SETPOS: u32 = 0x0405;
@@ -205,9 +206,10 @@ impl Settings {
             SendMessageW(chance, TBM_SETPOS, WPARAM(1), LPARAM(min_chance.min(50) as isize));
             mk(st, s.help, 0, 0, 16.0, 328.0, 480.0, 60.0, 0);
             let status = mk(st, "", 0, 0, 16.0, 396.0, 480.0, 24.0, 0);
-            mk(bt, s.test_key, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 16.0, 430.0, 140.0, 30.0, ID_TEST);
-            mk(bt, s.cancel, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 252.0, 430.0, 116.0, 30.0, ID_CANCEL);
-            mk(bt, s.save, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 380.0, 430.0, 116.0, 30.0, ID_SAVE);
+            mk(bt, s.test_key, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 16.0, 430.0, 124.0, 30.0, ID_TEST);
+            mk(bt, s.cancel, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 176.0, 430.0, 102.0, 30.0, ID_CANCEL);
+            mk(bt, s.apply, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 285.0, 430.0, 102.0, 30.0, ID_APPLY);
+            mk(bt, s.save, BS_PUSHBUTTON as u32 | WS_TABSTOP.0, 0, 394.0, 430.0, 102.0, 30.0, ID_SAVE);
             let set = |h: HWND, on: bool| {
                 SendMessageW(h, BM_SETCHECK, WPARAM(on as usize), LPARAM(0));
             };
