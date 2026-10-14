@@ -650,6 +650,27 @@ impl App {
             m.n = if per_event { m.n_b } else { m.n_a };
         }
         // Left button pressed on the map (not on the game's help panel): a drag (pan) starts.
+        // Ctrl + click on a "Quests" layer marker: start tracking that quest on the account. The click itself is not
+        // blocked (the game receives it as usual); we only read it.
+        let ctrl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) } < 0;
+        if flags & LEFT_DOWN != 0 && ctrl {
+            let (lx, ly) = ((pos.0 - gx) as f64, (pos.1 - gy) as f64);
+            let lim = (9.0 * (gh as f64 / 1440.0).max(0.5)) + 8.0;
+            let hit = m
+                .points
+                .iter()
+                .filter(|p| p.quest_ref.is_some())
+                .map(|p| (p, m.project(p.u, p.v)))
+                .filter(|(_, (x, y))| (x - lx).powi(2) + (y - ly).powi(2) < lim * lim)
+                .min_by(|a, b| ((a.1 .0 - lx).powi(2) + (a.1 .1 - ly).powi(2)).total_cmp(&((b.1 .0 - lx).powi(2) + (b.1 .1 - ly).powi(2))))
+                .and_then(|(p, _)| p.quest_ref.clone());
+            if let Some((qid, title)) = hit {
+                logf!("Ctrl+click: track {qid}");
+                let _ = self.net.send(Req::Track { quest_id: qid, tracked: true });
+                tray::balloon(self.main, "Hunger Overlay", &format!("✔ {title}"));
+                return;
+            }
+        }
         if flags & LEFT_DOWN != 0 {
             let (cx, cy) = pos;
             let (lx, ly) = ((cx - gx) as f64, (cy - gy) as f64);
@@ -1170,6 +1191,7 @@ impl App {
                 items: sh.items.as_ref(),
                 searched,
                 harvest_title: self.s.harvest_layer,
+                quests_title: self.s.quests_layer,
             };
             let v = model::build_view(p, t, &opts);
             m.points = v.points;
@@ -1491,9 +1513,10 @@ impl App {
             if let Some(p) = m.points.get(i) {
                 let (x, y) = m.project(p.u, p.v);
                 let lq = m.legend.get(p.quest);
-                let title = match p.layer {
-                    Some(li) => m.layers.get(li).map(|l| l.title.as_str()).unwrap_or(""),
-                    None => lq.map(|q| q.title.as_str()).unwrap_or(""),
+                let title = match (&p.quest_ref, p.layer) {
+                    (Some((_, qt)), _) => qt.as_str(),
+                    (None, Some(li)) => m.layers.get(li).map(|l| l.title.as_str()).unwrap_or(""),
+                    (None, None) => lq.map(|q| q.title.as_str()).unwrap_or(""),
                 };
                 // Tooltip = this point only: the objective, then the container and ITS chance.
                 // (The "Best: … · Enemies: …" summary is about the whole objective: it stays in the panel.)
@@ -1502,7 +1525,11 @@ impl App {
                 if let Some(o) = obj {
                     lines.push(o.label.clone());
                 }
-                if let Some(h) = &p.harvest {
+                if p.quest_ref.is_some() {
+                    // Quest-layer marker: the objective, then how to start tracking the quest.
+                    lines.push(p.label.clone());
+                    lines.push(self.s.tip_track_hint.to_string());
+                } else if let Some(h) = &p.harvest {
                     let node = h.node.clone().unwrap_or_default();
                     let mut l = format!("{} : {node}", self.s.tip_harvest);
                     if let Some(pr) = &h.profession {

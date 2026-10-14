@@ -419,6 +419,8 @@ pub struct DrawPoint {
     pub diamond: bool,
     /// Placed loot (weapon stuck in the ground, placed object, key on the floor).
     pub placed: bool,
+    /// Quest-layer point: the (untracked) quest it belongs to, so the player can start tracking it (Ctrl+click).
+    pub quest_ref: Option<(String, String)>,
 }
 
 /// Harvest details of a point.
@@ -501,6 +503,8 @@ pub struct ViewOpts<'a> {
     pub searched: Vec<(String, String, Option<&'a [Marker]>)>,
     /// Title of the merged "Harvest" layer (translated).
     pub harvest_title: &'a str,
+    /// Translated title of the "Quests" layer (objective locations of every quest the player does not track).
+    pub quests_title: &'a str,
 }
 
 /// Colours of searched items (distinct from the website's quest palette).
@@ -557,6 +561,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             layer: None,
             diamond: false,
             placed: mk.source.as_deref() == Some("placed"),
+            quest_ref: None,
         }
     };
 
@@ -729,6 +734,44 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             out.layers.push(LegendLayer { id: ly.id.clone(), title: ly.title.clone(), color, diamond: ly.shape == "diamond", on, here });
         }
     }
+    // 5. "Quests" layer: the precise objective locations of every quest the player does NOT track yet, so quests
+    //    can be discovered on the map (and tracked with Ctrl+click). Loot-source points are not included (too many).
+    let quests_on = o.layers_on.iter().any(|l| l == "quests");
+    let tracked: std::collections::HashSet<&str> = tracker.tracked.iter().map(|t| t.quest_id.as_str()).collect();
+    let li = out.layers.iter().position(|l| l.id == "places").map(|p| p + 1).unwrap_or(out.layers.len());
+    let qcolor = (0.96, 0.84, 0.45);
+    let mut here = 0;
+    let mut qpoints = vec![];
+    for (qid, pq) in &pack.quests {
+        if tracked.contains(qid.as_str()) {
+            continue;
+        }
+        for po in &pq.objectives {
+            for mk in po.markers.iter().filter(|m| m.map == map_id && m.source.as_deref() == Some("objective")) {
+                let Some((u, v)) = to_uv(mk) else { continue };
+                here += 1;
+                if quests_on {
+                    let mut p = point(mk, u, v, qcolor, usize::MAX, None, false, false, &po.label);
+                    p.label = po.label.clone();
+                    p.quest_ref = Some((qid.clone(), pq.title.clone()));
+                    qpoints.push(p);
+                }
+            }
+        }
+    }
+    // Layer indexes after the insertion point move by one.
+    for p in out.points.iter_mut() {
+        if let Some(l) = p.layer.as_mut() {
+            if *l >= li {
+                *l += 1;
+            }
+        }
+    }
+    for p in qpoints.iter_mut() {
+        p.layer = Some(li);
+    }
+    out.points.extend(qpoints);
+    out.layers.insert(li, LegendLayer { id: "quests".into(), title: o.quests_title.into(), color: qcolor, diamond: false, on: quests_on, here });
     out
 }
 
@@ -747,7 +790,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest" };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests" };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();
