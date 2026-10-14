@@ -45,7 +45,8 @@ impl Default for Config {
             marker_scale: 1.0,
             base_url: DEFAULT_BASE_URL.into(),
             locale: String::new(),
-            min_chance: 0,
+            // 10 % = même règle que le carnet du site (le pack envoie les points ≥ 1 %).
+            min_chance: 10,
             hidden_quests: vec![],
             panel_collapsed: false,
         }

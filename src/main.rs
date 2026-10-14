@@ -887,7 +887,7 @@ impl App {
                 }
                 match p.chance {
                     Some(c) => {
-                        let container = p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim).filter(|t| !t.is_empty());
+                        let container = p.container.as_deref().or_else(|| p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim)).filter(|t| !t.is_empty());
                         let pct = c * 100.0;
                         let pct = if pct >= 10.0 { format!("{pct:.0}") } else { format!("{pct:.1}") };
                         match container {

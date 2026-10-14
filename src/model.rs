@@ -45,6 +45,9 @@ pub struct Marker {
     /// Chance (0..1) que le conteneur contienne l'objet, si le site la fournit.
     #[serde(default)]
     pub chance: Option<f64>,
+    /// Type de conteneur (nom anglais), si le site le fournit.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 impl Marker {
@@ -180,6 +183,7 @@ pub struct DrawPoint {
     pub label: String,
     /// Chance (0..1) que CE conteneur contienne l'objet, si connue.
     pub chance: Option<f64>,
+    pub container: Option<String>,
 }
 
 /// Une ligne de la légende (quête suivie et ses objectifs).
@@ -264,6 +268,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
                             place: false,
                             label: mk.label.clone().unwrap_or_else(|| po.label.clone()),
                             chance: mk.chance(),
+                            container: mk.container.clone(),
                         });
                     }
                 }
@@ -284,6 +289,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
                     place: true,
                     label: mk.label.clone().unwrap_or_default(),
                     chance: None,
+                    container: None,
                 });
             }
         }
