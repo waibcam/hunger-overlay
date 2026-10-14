@@ -178,6 +178,8 @@ pub struct DrawPoint {
     pub optional: bool,
     pub place: bool,
     pub label: String,
+    /// Chance (0..1) que CE conteneur contienne l'objet, si connue.
+    pub chance: Option<f64>,
 }
 
 /// Une ligne de la légende (quête suivie et ses objectifs).
@@ -261,6 +263,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
                             optional: po.optional,
                             place: false,
                             label: mk.label.clone().unwrap_or_else(|| po.label.clone()),
+                            chance: mk.chance(),
                         });
                     }
                 }
@@ -280,6 +283,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, map_id: &str, show_done: bool,
                     optional: false,
                     place: true,
                     label: mk.label.clone().unwrap_or_default(),
+                    chance: None,
                 });
             }
         }

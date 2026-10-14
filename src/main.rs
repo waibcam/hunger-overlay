@@ -878,13 +878,27 @@ impl App {
                 let (x, y) = m.project(p.u, p.v);
                 let lq = m.legend.get(p.quest);
                 let title = lq.map(|q| q.title.as_str()).unwrap_or("");
-                let mut lines = vec![p.label.clone()];
-                if let Some(o) = p.objective.and_then(|oi| lq.and_then(|q| q.objectives.get(oi))) {
-                    if o.label != p.label && !p.label.starts_with(&o.label) {
-                        lines.push(o.label.clone());
+                // Infobulle = ce point seulement : l'objectif, puis le conteneur et SA chance.
+                // (Le résumé « Meilleur : … · Ennemis : … » concerne tout l'objectif : il reste dans le panneau.)
+                let mut lines = vec![];
+                let obj = p.objective.and_then(|oi| lq.and_then(|q| q.objectives.get(oi)));
+                if let Some(o) = obj {
+                    lines.push(o.label.clone());
+                }
+                match p.chance {
+                    Some(c) => {
+                        let container = p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim).filter(|t| !t.is_empty());
+                        let pct = c * 100.0;
+                        let pct = if pct >= 10.0 { format!("{pct:.0}") } else { format!("{pct:.1}") };
+                        match container {
+                            Some(k) => lines.push(format!("{} : {k} · {pct} % {}", self.s.tip_container, self.s.tip_chance)),
+                            None => lines.push(format!("{} · {pct} % {}", p.label, self.s.tip_chance)),
+                        }
                     }
-                    if let Some(h) = &o.hint {
-                        lines.push(h.clone());
+                    None => {
+                        if obj.map(|o| o.label != p.label && !p.label.starts_with(&o.label)).unwrap_or(true) {
+                            lines.push(p.label.clone());
+                        }
                     }
                 }
                 draw_tooltip(r, title, p.color, &lines, x as f32, y as f32, gw as f32, gh as f32, sc);
