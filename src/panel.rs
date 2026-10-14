@@ -3,7 +3,7 @@
 //! (WS_EX_NOACTIVATE) ; le reste de l'overlay laisse passer tous les clics vers le jeu.
 
 use crate::i18n::Strings;
-use crate::model::LegendQuest;
+use crate::model::{LegendLayer, LegendQuest};
 use crate::net::Status;
 use crate::render::{Font, Renderer, Rgba};
 
@@ -16,6 +16,7 @@ pub enum Action {
     ChanceUp,
     Language,
     ToggleQuest(String),
+    ToggleLayer(String),
 }
 
 /// Zone cliquable (coordonnées locales au panneau).
@@ -37,6 +38,7 @@ impl Hit {
 pub struct View<'a> {
     pub s: &'static Strings,
     pub legend: &'a [LegendQuest],
+    pub layers: &'a [LegendLayer],
     pub status: Option<&'a Status>,
     pub show_done: bool,
     pub min_chance: u32,
@@ -225,6 +227,39 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
             }
         }
         y += 4.0 * sc;
+    }
+
+    // 5. Calques (cases à cocher), s'il y en a dans le pack.
+    if !v.layers.is_empty() {
+        y += 2.0 * sc;
+        if draw {
+            r.line(pad, y, w - pad, y, 1.0, (0.85, 0.75, 0.55, 0.25));
+        }
+        y += 8.0 * sc;
+        let (_, lh) = r.measure(s.panel_layers, Font::Small, iw);
+        if draw {
+            r.text(s.panel_layers, Font::Small, pad, y, iw, GOLD);
+        }
+        y += lh + 4.0 * sc;
+        for ly in v.layers {
+            let t = format!("{} {}  ({})", if ly.on { "☑" } else { "☐" }, ly.title, ly.here);
+            let (_, h) = r.measure(&t, Font::Text, iw - 20.0 * sc);
+            if draw {
+                if hov(&hits) {
+                    r.fill_rrect(pad - 6.0 * sc, y - 2.0 * sc, w - pad + 6.0 * sc, y + h + 2.0 * sc, 4.0 * sc, (1.0, 1.0, 1.0, 0.08));
+                }
+                let (cx, cy) = (pad + 6.0 * sc, y + h / 2.0);
+                let c = (ly.color.0, ly.color.1, ly.color.2, if ly.on { 1.0 } else { 0.45 });
+                if ly.diamond {
+                    r.diamond(cx, cy, 6.0 * sc, 2.0 * sc, c);
+                } else {
+                    r.fill_circle(cx, cy, 5.0 * sc, c);
+                }
+                r.text(&t, Font::Text, pad + 20.0 * sc, y, iw - 20.0 * sc, if ly.on { TEXT } else { DIM });
+            }
+            hits.push(Hit { l: pad - 6.0 * sc, t: y - 2.0 * sc, r: w - pad + 6.0 * sc, b: y + h + 2.0 * sc, action: Action::ToggleLayer(ly.id.clone()) });
+            y += h + gap;
+        }
     }
     ((y + pad - 4.0 * sc).min(max_h), hits)
 }

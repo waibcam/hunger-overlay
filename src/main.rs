@@ -94,6 +94,7 @@ struct OpenMap {
     next_idle_resync: Instant,
     points: Vec<DrawPoint>,
     legend: Vec<LegendQuest>,
+    layers: Vec<model::LegendLayer>,
     data_version: u64,
 }
 
@@ -346,6 +347,13 @@ impl App {
                 self.cfg.locale = order[(i + 1) % order.len()].to_string();
                 self.configure_net();
                 let _ = self.net.send(Req::Refresh { force: true });
+            }
+            panel::Action::ToggleLayer(id) => {
+                if let Some(p) = self.cfg.layers_on.iter().position(|q| *q == id) {
+                    self.cfg.layers_on.remove(p);
+                } else {
+                    self.cfg.layers_on.push(id);
+                }
             }
             panel::Action::ToggleQuest(id) => {
                 if let Some(p) = self.cfg.hidden_quests.iter().position(|q| *q == id) {
@@ -774,6 +782,7 @@ impl App {
             next_idle_resync: now + Duration::from_millis(1200),
             points: vec![],
             legend: vec![],
+            layers: vec![],
             data_version: u64::MAX,
         }
     }
@@ -890,12 +899,22 @@ impl App {
         }
         m.data_version = sh.version;
         if let (Some(p), Some(t)) = (&sh.pack, &sh.tracker) {
-            let (pts, legend) = model::build_view(p, t, m.map_id, self.cfg.show_done, &self.cfg.hidden_quests, self.cfg.min_chance as f64 / 100.0);
-            m.points = pts;
-            m.legend = legend;
+            let opts = model::ViewOpts {
+                map_id: m.map_id,
+                show_done: self.cfg.show_done,
+                hidden: &self.cfg.hidden_quests,
+                min_chance: self.cfg.min_chance as f64 / 100.0,
+                layers_on: &self.cfg.layers_on,
+                items: sh.items.as_ref(),
+            };
+            let v = model::build_view(p, t, &opts);
+            m.points = v.points;
+            m.legend = v.legend;
+            m.layers = v.layers;
         } else {
             m.points.clear();
             m.legend.clear();
+            m.layers.clear();
         }
         self.dirty = true;
     }
@@ -1076,8 +1095,24 @@ impl App {
             }
             let hov = self.hover == Some(i);
             let rr = if hov { rad * 1.35 } else { rad };
-            let c: Rgba = (p.color.0, p.color.1, p.color.2, 1.0);
-            if p.place {
+            let c: Rgba = (p.color.0, p.color.1, p.color.2, if p.locked { 0.45 } else { 1.0 });
+            if p.layer.is_some() {
+                // Point de calque : plus petit et plus discret que les objectifs.
+                let lr = rr * 0.62;
+                if p.diamond {
+                    r.diamond(x, y, lr * 1.35, 3.5 * sc, (0.0, 0.0, 0.0, 0.7));
+                    r.diamond(x, y, lr * 1.35, 1.8 * sc, c);
+                } else {
+                    r.fill_circle(x, y, lr + 1.5 * sc, (0.0, 0.0, 0.0, 0.6));
+                    r.fill_circle(x, y, lr, c);
+                }
+            } else if p.harvest.is_some() {
+                // Nœud de récolte : carré arrondi (grisé si le niveau requis dépasse celui du joueur).
+                let hr = rr * 0.95;
+                r.fill_rrect(x - hr - 2.0 * sc, y - hr - 2.0 * sc, x + hr + 2.0 * sc, y + hr + 2.0 * sc, 3.0 * sc, (0.0, 0.0, 0.0, 0.55));
+                r.fill_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, c);
+                r.stroke_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, 1.4 * sc, (1.0, 1.0, 1.0, if p.locked { 0.5 } else { 0.95 }));
+            } else if p.place {
                 r.diamond(x, y, rr * 1.3, 4.0 * sc, (0.0, 0.0, 0.0, 0.75));
                 r.diamond(x, y, rr * 1.3, 2.0 * sc, c);
             } else if p.done {
@@ -1102,6 +1137,7 @@ impl App {
             let view = panel::View {
                 s: self.s,
                 legend: &m.legend,
+                layers: &m.layers,
                 status: self.last_status.as_ref(),
                 show_done: self.cfg.show_done,
                 min_chance: self.cfg.min_chance,
@@ -1122,7 +1158,10 @@ impl App {
             if let Some(p) = m.points.get(i) {
                 let (x, y) = m.project(p.u, p.v);
                 let lq = m.legend.get(p.quest);
-                let title = lq.map(|q| q.title.as_str()).unwrap_or("");
+                let title = match p.layer {
+                    Some(li) => m.layers.get(li).map(|l| l.title.as_str()).unwrap_or(""),
+                    None => lq.map(|q| q.title.as_str()).unwrap_or(""),
+                };
                 // Infobulle = ce point seulement : l'objectif, puis le conteneur et SA chance.
                 // (Le résumé « Meilleur : … · Ennemis : … » concerne tout l'objectif : il reste dans le panneau.)
                 let mut lines = vec![];
@@ -1130,7 +1169,21 @@ impl App {
                 if let Some(o) = obj {
                     lines.push(o.label.clone());
                 }
-                match p.chance {
+                if let Some(h) = &p.harvest {
+                    let node = h.node.clone().unwrap_or_default();
+                    let mut l = format!("{} : {node}", self.s.tip_harvest);
+                    if let Some(pr) = &h.profession {
+                        l += &format!(" · {pr}");
+                    }
+                    if let Some(c) = p.chance {
+                        l += &format!(" · {:.0} % {}", c * 100.0, self.s.tip_chance);
+                    }
+                    lines.push(l);
+                    if let Some(lv) = h.level {
+                        let you = h.player.map(|pl| format!(" ({} : {pl})", self.s.tip_you)).unwrap_or_default();
+                        lines.push(format!("{} : {lv}{you}", self.s.tip_level));
+                    }
+                } else { match p.chance {
                     Some(c) => {
                         let container = p.container.as_deref().or_else(|| p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim)).filter(|t| !t.is_empty());
                         let pct = c * 100.0;
@@ -1141,11 +1194,11 @@ impl App {
                         }
                     }
                     None => {
-                        if obj.map(|o| o.label != p.label && !p.label.starts_with(&o.label)).unwrap_or(true) {
+                        if !p.label.is_empty() && obj.map(|o| o.label != p.label && !p.label.starts_with(&o.label)).unwrap_or(true) {
                             lines.push(p.label.clone());
                         }
                     }
-                }
+                } }
                 draw_tooltip(r, title, p.color, &lines, x as f32, y as f32, gw as f32, gh as f32, sc);
             }
         }

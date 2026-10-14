@@ -39,6 +39,8 @@ pub struct Config {
     pub auto_update: bool,
     /// Thème de la fenêtre de paramètres : "auto" (celui de Windows), "light", "dark".
     pub theme: String,
+    /// Calques cochés dans le panneau (id).
+    pub layers_on: Vec<String>,
 }
 
 impl Default for Config {
@@ -59,6 +61,7 @@ impl Default for Config {
             wheel_per_event: None,
             auto_update: true,
             theme: "auto".into(),
+            layers_on: vec![],
         }
     }
 }

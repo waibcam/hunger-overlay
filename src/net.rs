@@ -3,7 +3,7 @@
 //! Cadence (contrat v1) : pack une fois par lancement (ETag), tracker à l'ouverture de la carte avec
 //! au moins 30 s d'intervalle et au plus 100 requêtes par heure ; aucun polling de fond.
 
-use crate::model::{Pack, Tracker};
+use crate::model::{ItemsPack, Pack, Tracker};
 use crate::logf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,8 @@ pub enum Req {
 pub struct Shared {
     pub pack: Option<Pack>,
     pub tracker: Option<Tracker>,
+    /// Où trouver les ingrédients de recette (chargé seulement si une liste de fabrication existe).
+    pub items: Option<ItemsPack>,
     pub status: Option<Status>,
     /// Incrémenté à chaque changement de données (l'interface redessine).
     pub version: u64,
@@ -55,6 +57,8 @@ struct Etags {
     pack: Option<String>,
     pack_url: Option<String>,
     tracker: Option<String>,
+    #[serde(default)]
+    items: Option<String>,
     last_update_check: u64,
 }
 
@@ -127,6 +131,11 @@ impl Worker {
         if tracker.is_none() {
             self.etags.tracker = None;
         }
+        let items: Option<ItemsPack> = std::fs::read_to_string(Self::cache("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+        if items.is_none() {
+            self.etags.items = None;
+        }
+        self.shared.lock().unwrap().items = items;
         logf!("cache : pack={} tracker={}", pack.as_ref().map(|p| p.pack_version.as_str()).unwrap_or("-"), tracker.is_some());
         self.locale = pack.as_ref().map(|p| p.locale.clone()).unwrap_or_default();
         let mut s = self.shared.lock().unwrap();
@@ -289,9 +298,47 @@ impl Worker {
             (self.notify)();
             return;
         }
+        // Liste de fabrication : il faut savoir où trouver les ingrédients (items.json, même version que le pack).
+        let need_items = {
+            let s = self.shared.lock().unwrap();
+            match &s.tracker {
+                Some(t) if !t.crafting.is_empty() => s.items.as_ref().map(|i| i.pack_version != t.pack_version).unwrap_or(true),
+                _ => false,
+            }
+        };
+        if need_items {
+            self.fetch_items();
+        }
         self.save_etags();
         self.set_status(Status::Ok);
         (self.notify)();
+    }
+
+    fn fetch_items(&mut self) {
+        let url = format!("{}/api/overlay/v1/items.json", self.base);
+        let mut req = self.agent.get(&url).set("Accept", "application/json");
+        if let Some(e) = &self.etags.items {
+            req = req.set("If-None-Match", e);
+        }
+        match req.call() {
+            Ok(resp) if resp.status() == 304 => logf!("items : 304"),
+            Ok(resp) => {
+                let etag = resp.header("ETag").map(|e| e.trim().to_string());
+                let body = resp.into_string().unwrap_or_default();
+                match serde_json::from_str::<ItemsPack>(&body) {
+                    Ok(it) => {
+                        logf!("items : 200 ({} objets, {} Ko)", it.items.len(), body.len() / 1024);
+                        let _ = std::fs::write(Self::cache("items.json"), &body);
+                        self.etags.items = etag;
+                        let mut s = self.shared.lock().unwrap();
+                        s.items = Some(it);
+                        s.version += 1;
+                    }
+                    Err(e) => logf!("items : JSON invalide ({e})"),
+                }
+            }
+            Err(e) => logf!("items : {}", err_kind(&e)),
+        }
     }
 
     /// Télécharge le pack (version localisée si elle existe, sinon anglais). Renvoie false en cas d'échec réseau.
