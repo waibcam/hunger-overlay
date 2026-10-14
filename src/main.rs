@@ -17,6 +17,7 @@ mod net;
 mod panel;
 mod render;
 mod resync;
+mod search;
 mod settings;
 mod tray;
 mod update;
@@ -175,6 +176,11 @@ struct App {
     /// Installation demandée depuis le menu (en mode « me prévenir »).
     install_requested: bool,
     next_update_check: Instant,
+    /// Fenêtre « Chercher un objet ».
+    search: Option<search::Search>,
+    /// Objets / index déjà demandés au réseau (pour ne pas redemander en boucle).
+    items_requested: HashSet<String>,
+    index_requested: bool,
 }
 
 /// Mémorise sur disque la dernière carte vue (pour cette taille d'écran) : carte, carré par défaut, panneau d'aide.
@@ -256,6 +262,15 @@ fn client_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         let mut p = POINT { x: 0, y: 0 };
         let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p);
         Some((p.x, p.y, r.right - r.left, r.bottom - r.top))
+    }
+}
+
+/// Une fenêtre de l'appli (recherche, paramètres) est-elle au premier plan ?
+fn ours_fg() -> bool {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+        pid == windows::Win32::System::Threading::GetCurrentProcessId()
     }
 }
 
@@ -347,6 +362,13 @@ impl App {
                 self.cfg.locale = order[(i + 1) % order.len()].to_string();
                 self.configure_net();
                 let _ = self.net.send(Req::Refresh { force: true });
+            }
+            panel::Action::Search => {
+                self.open_search();
+                return;
+            }
+            panel::Action::RemoveSearch(key) => {
+                self.cfg.search_items.retain(|k| *k != key);
             }
             panel::Action::ToggleLayer(id) => {
                 if let Some(p) = self.cfg.layers_on.iter().position(|q| *q == id) {
@@ -554,7 +576,7 @@ impl App {
                 }
             }
         };
-        let visible = game.is_some()
+        let visible = (game.is_some() || ours_fg())
             && matches!(&self.state, MapState::Open(m) if m.closing_check.is_none() && !m.wide_pending && !m.resync_at.map(|r| r.1).unwrap_or(false));
         if visible {
             let hov = self.compute_hover();
@@ -893,12 +915,37 @@ impl App {
             self.update_hint_shown = true;
             tray::balloon(self.main, "Hunger Overlay", self.s.update_available);
         }
+        // Recherche d'objets : index (noms) et fichiers des objets cherchés, demandés une seule fois.
+        let need_index = (!self.cfg.search_items.is_empty() || self.search.is_some()) && sh.search_index.is_none();
+        if need_index && !self.index_requested {
+            self.index_requested = true;
+            let _ = self.net.send(Req::FetchIndex);
+        }
+        for k in &self.cfg.search_items {
+            if !sh.search_items.contains_key(k) && self.items_requested.insert(k.clone()) {
+                let _ = self.net.send(Req::FetchItem(k.clone()));
+            }
+        }
+        if let (Some(st), Some(ix)) = (self.search.as_mut(), sh.search_index.as_ref()) {
+            if !st.has_entries() {
+                st.set_entries(search_entries(ix));
+            }
+        }
         let MapState::Open(m) = &mut self.state else { return };
         if m.data_version == sh.version {
             return;
         }
         m.data_version = sh.version;
         if let (Some(p), Some(t)) = (&sh.pack, &sh.tracker) {
+            let searched: Vec<(String, String, Option<&[model::Marker]>)> = self
+                .cfg
+                .search_items
+                .iter()
+                .map(|k| {
+                    let name = sh.search_index.as_ref().and_then(|ix| ix.items.iter().find(|i| i.item_key == *k)).map(|i| i.name.clone()).unwrap_or_else(|| k.clone());
+                    (k.clone(), name, sh.search_items.get(k).map(|f| f.markers.as_slice()))
+                })
+                .collect();
             let opts = model::ViewOpts {
                 map_id: m.map_id,
                 show_done: self.cfg.show_done,
@@ -906,6 +953,7 @@ impl App {
                 min_chance: self.cfg.min_chance as f64 / 100.0,
                 layers_on: &self.cfg.layers_on,
                 items: sh.items.as_ref(),
+                searched,
             };
             let v = model::build_view(p, t, &opts);
             m.points = v.points;
@@ -1106,6 +1154,11 @@ impl App {
                     r.fill_circle(x, y, lr + 1.5 * sc, (0.0, 0.0, 0.0, 0.6));
                     r.fill_circle(x, y, lr, c);
                 }
+            } else if p.placed {
+                // Loot posé : losange plein.
+                r.diamond(x, y, rr * 1.15, 6.0 * sc, (0.0, 0.0, 0.0, 0.6));
+                r.diamond(x, y, rr * 1.15, 3.5 * sc, c);
+                r.diamond(x, y, rr * 0.6, 4.5 * sc, c);
             } else if p.harvest.is_some() {
                 // Nœud de récolte : carré arrondi (grisé si le niveau requis dépasse celui du joueur).
                 let hr = rr * 0.95;
@@ -1183,6 +1236,9 @@ impl App {
                         let you = h.player.map(|pl| format!(" ({} : {pl})", self.s.tip_you)).unwrap_or_default();
                         lines.push(format!("{} : {lv}{you}", self.s.tip_level));
                     }
+                } else if p.placed {
+                    let pct = p.chance.map(|c| format!(" · {} % {}", if c * 100.0 >= 1.0 { format!("{:.0}", c * 100.0) } else { format!("{:.2}", c * 100.0) }, self.s.tip_chance)).unwrap_or_default();
+                    lines.push(format!("{}{pct}", self.s.tip_placed));
                 } else { match p.chance {
                     Some(c) => {
                         let container = p.container.as_deref().or_else(|| p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim)).filter(|t| !t.is_empty());
@@ -1205,6 +1261,52 @@ impl App {
         self.renderer.present(self.overlay, gx, gy);
         self.legend_rect = legend_rect;
         self.show_panel(legend_rect.is_some());
+    }
+
+    // ---------- Recherche d'objet ----------
+
+    fn open_search(&mut self) {
+        if let Some(s) = &self.search {
+            unsafe {
+                let _ = SetForegroundWindow(s.hwnd);
+            }
+            return;
+        }
+        let entries = self.shared.lock().unwrap().search_index.as_ref().map(search_entries);
+        if entries.is_none() && !self.index_requested {
+            self.index_requested = true;
+            let _ = self.net.send(Req::FetchIndex);
+        }
+        self.search = search::Search::open(self.s, &self.cfg.theme, entries, self.client);
+    }
+
+    fn search_pick(&mut self, key: String) {
+        if !self.cfg.search_items.contains(&key) {
+            self.cfg.search_items.push(key.clone());
+            self.cfg.save();
+        }
+        if self.items_requested.insert(key.clone()) {
+            let _ = self.net.send(Req::FetchItem(key));
+        }
+        self.close_search();
+        if let MapState::Open(m) = &mut self.state {
+            m.data_version = u64::MAX;
+        }
+        self.dirty = true;
+    }
+
+    fn close_search(&mut self) {
+        if let Some(s) = self.search.take() {
+            s.close();
+        }
+        // Retour au jeu (on est au premier plan, donc autorisé).
+        unsafe {
+            let mut game = HWND::default();
+            let _ = EnumWindows(Some(find_game), LPARAM(&mut game as *mut HWND as isize));
+            if !game.is_invalid() {
+                let _ = SetForegroundWindow(game);
+            }
+        }
     }
 
     // ---------- Paramètres ----------
@@ -1405,6 +1507,33 @@ fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[Stri
     }
 }
 
+fn search_entries(ix: &model::SearchIndex) -> Vec<search::Entry> {
+    ix.items
+        .iter()
+        .map(|i| search::Entry { key: i.item_key.clone(), name: i.name.clone(), rarity: i.rarity.clone(), n: i.n, sources: i.sources.clone() })
+        .collect()
+}
+
+unsafe extern "system" fn find_game(h: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
+    if IsWindowVisible(h).as_bool() && is_game_window(h) {
+        *(lp.0 as *mut HWND) = h;
+        return false.into();
+    }
+    true.into()
+}
+
+pub fn with_search<R>(f: impl FnOnce(&mut search::Search) -> R) -> Option<R> {
+    with_app(|a| a.search.as_mut().map(f)).flatten()
+}
+
+pub fn on_search_pick(key: String) {
+    with_app(|a| a.search_pick(key));
+}
+
+pub fn on_search_close() {
+    with_app(|a| a.close_search());
+}
+
 /// Accès à la fenêtre de paramètres ouverte (depuis sa procédure de fenêtre).
 pub fn with_settings<R>(f: impl FnOnce(&mut settings::Settings) -> R) -> Option<R> {
     with_app(|a| a.settings.as_mut().map(f)).flatten()
@@ -1485,6 +1614,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             match wp.0 & 0xffff {
                 tray::ID_SETTINGS => {
                     with_app(|a| a.open_settings());
+                }
+                tray::ID_SEARCH => {
+                    with_app(|a| a.open_search());
                 }
                 tray::ID_REFRESH => {
                     with_app(|a| {
@@ -1712,6 +1844,9 @@ fn main() {
             rs_job: None,
             rs_next_id: 1,
             install_requested: false,
+            search: None,
+            items_requested: HashSet::new(),
+            index_requested: false,
             next_update_check: Instant::now() + Duration::from_secs(6 * 3600),
         };
         app.apply_capture_affinity();

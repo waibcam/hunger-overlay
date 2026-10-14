@@ -4,7 +4,7 @@
 - assets/icon.ico : icône de l'appli.
 Usage : python tools/make_assets.py <dossier atlas>   (ex. HungerDB/export/maps/atlas)
 """
-import sys, os
+import sys, os, io
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -20,11 +20,32 @@ for m in ('Map01', 'Map02', 'Map03'):
     np.asarray(big, dtype=np.uint8).tofile(os.path.join(here, f'ref512_{m}.bin'))
     print(m, small.size, big.size)
 
-# icône : celle du site Hunger Companion (assets/icon_source.png, 512x512), coins arrondis
-src = Image.open(os.path.join(here, 'icon_source.png')).convert('RGBA').resize((256, 256), Image.LANCZOS)
-mask = Image.new('L', (256, 256), 0)
-ImageDraw.Draw(mask).rounded_rectangle((0, 0, 255, 255), 48, fill=255)
-big = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
-big.paste(src, (0, 0), mask)
-big.save(os.path.join(here, 'icon.ico'), sizes=[(s, s) for s in (16, 20, 24, 32, 40, 48, 64, 256)])
-print('icon ok')
+# icône « HC » (assets/icon_source.png, image d'origine, non versionnée car lourde ; sinon assets/icon_512.png).
+# Grandes tailles = image complète ; petites tailles (≤ 32 px) = recadrage sur les lettres « HC », sinon illisible.
+from PIL import ImageEnhance
+src_path = os.path.join(here, 'icon_source.png')
+if not os.path.exists(src_path):
+    src_path = os.path.join(here, 'icon_512.png')
+full = Image.open(src_path).convert('RGBA')
+full.resize((512, 512), Image.LANCZOS).save(os.path.join(here, 'icon_512.png'), optimize=True)
+W = full.width
+crop = full.crop((int(0.29 * W), int(0.345 * W), int(0.70 * W), int(0.755 * W)))
+crop = ImageEnhance.Contrast(crop).enhance(1.25)
+frames = {}
+for size in (16, 20, 24, 32, 40, 48, 64, 128, 256):
+    base = crop if size <= 32 else full
+    frames[size] = base.resize((size, size), Image.LANCZOS)
+# Pillow écrit chaque taille depuis l'image fournie : on assemble l'ICO à la main pour garder les deux variantes.
+import struct
+entries, blobs = [], []
+for size, img in frames.items():
+    b = io.BytesIO(); img.save(b, 'PNG'); data = b.getvalue()
+    entries.append((size, data))
+offset = 6 + 16 * len(entries)
+out = struct.pack('<HHH', 0, 1, len(entries))
+body = b''
+for size, data in entries:
+    out += struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), offset + len(body))
+    body += data
+open(os.path.join(here, 'icon.ico'), 'wb').write(out + body)
+print('icon ok', [s for s, _ in entries])

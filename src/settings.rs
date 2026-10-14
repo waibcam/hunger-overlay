@@ -85,20 +85,20 @@ struct Hit {
 }
 
 pub struct Theme {
-    bg: Rgba,
-    card: Rgba,
-    border: Rgba,
-    text: Rgba,
-    sub: Rgba,
-    accent: Rgba,
-    ctrl: Rgba,
-    hover: Rgba,
-    on_accent: Rgba,
-    ok: Rgba,
-    err: Rgba,
+    pub bg: Rgba,
+    pub card: Rgba,
+    pub border: Rgba,
+    pub text: Rgba,
+    pub sub: Rgba,
+    pub accent: Rgba,
+    pub ctrl: Rgba,
+    pub hover: Rgba,
+    pub on_accent: Rgba,
+    pub ok: Rgba,
+    pub err: Rgba,
 }
 
-const DARK: Theme = Theme {
+pub const DARK: Theme = Theme {
     bg: (0.125, 0.125, 0.125, 1.0),
     card: (0.17, 0.17, 0.17, 1.0),
     border: (0.26, 0.26, 0.26, 1.0),
@@ -112,7 +112,7 @@ const DARK: Theme = Theme {
     err: (1.0, 0.55, 0.5, 1.0),
 };
 
-const LIGHT: Theme = Theme {
+pub const LIGHT: Theme = Theme {
     bg: (0.953, 0.953, 0.953, 1.0),
     card: (1.0, 1.0, 1.0, 1.0),
     border: (0.88, 0.88, 0.88, 1.0),
@@ -125,6 +125,20 @@ const LIGHT: Theme = Theme {
     ok: (0.1, 0.55, 0.2, 1.0),
     err: (0.75, 0.15, 0.1, 1.0),
 };
+
+/// Thème effectif d'après le réglage ("auto" = celui de Windows).
+pub fn theme_for(setting: &str) -> &'static Theme {
+    let dark = match setting {
+        "dark" => true,
+        "light" => false,
+        _ => windows_dark(),
+    };
+    if dark {
+        &DARK
+    } else {
+        &LIGHT
+    }
+}
 
 /// Windows est-il en thème sombre (applications) ?
 pub fn windows_dark() -> bool {

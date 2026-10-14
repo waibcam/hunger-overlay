@@ -41,6 +41,8 @@ pub struct Config {
     pub theme: String,
     /// Calques cochés dans le panneau (id).
     pub layers_on: Vec<String>,
+    /// Objets cherchés affichés sur la carte (item_key).
+    pub search_items: Vec<String>,
 }
 
 impl Default for Config {
@@ -62,6 +64,7 @@ impl Default for Config {
             auto_update: true,
             theme: "auto".into(),
             layers_on: vec![],
+            search_items: vec![],
         }
     }
 }

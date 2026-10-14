@@ -3,7 +3,7 @@
 //! Cadence (contrat v1) : pack une fois par lancement (ETag), tracker à l'ouverture de la carte avec
 //! au moins 30 s d'intervalle et au plus 100 requêtes par heure ; aucun polling de fond.
 
-use crate::model::{ItemsPack, Pack, Tracker};
+use crate::model::{ItemFile, ItemsPack, Pack, SearchIndex, Tracker};
 use crate::logf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,10 @@ pub enum Req {
     Configure { key: Option<String>, base_url: String, locale: String },
     /// Tester une clé depuis les paramètres, sans la conserver.
     Validate(String),
+    /// Index de recherche d'objets (dans la langue voulue).
+    FetchIndex,
+    /// Marqueurs d'un objet cherché.
+    FetchItem(String),
     /// Vérifier s'il existe une nouvelle version ; `install` = la télécharger (et la vérifier) pour l'installer.
     CheckUpdate { install: bool },
 }
@@ -39,6 +43,9 @@ pub struct Shared {
     pub tracker: Option<Tracker>,
     /// Où trouver les ingrédients de recette (chargé seulement si une liste de fabrication existe).
     pub items: Option<ItemsPack>,
+    /// Recherche d'objets : index et fichiers des objets cherchés.
+    pub search_index: Option<SearchIndex>,
+    pub search_items: std::collections::HashMap<String, ItemFile>,
     pub status: Option<Status>,
     /// Incrémenté à chaque changement de données (l'interface redessine).
     pub version: u64,
@@ -186,6 +193,8 @@ impl Worker {
                     (self.notify)();
                 }
                 Req::CheckUpdate { install } => self.check_update(install),
+                Req::FetchIndex => self.fetch_index(),
+                Req::FetchItem(key) => self.fetch_item(&key),
             }
         }
     }
@@ -312,6 +321,58 @@ impl Worker {
         self.save_etags();
         self.set_status(Status::Ok);
         (self.notify)();
+    }
+
+    fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, String> {
+        let resp = self.agent.get(url).set("Accept", "application/json").call().map_err(|e| err_kind(&e))?;
+        let body = resp.into_string().map_err(|e| e.to_string())?;
+        serde_json::from_str(&body).map_err(|e| e.to_string())
+    }
+
+    fn fetch_index(&mut self) {
+        let want = self.wanted_locale();
+        let mut urls = vec![];
+        if want != "en" {
+            urls.push(format!("{}/api/overlay/v1/items_index.{want}.json", self.base));
+        }
+        urls.push(format!("{}/api/overlay/v1/items_index.json", self.base));
+        for url in urls {
+            match self.get_json::<SearchIndex>(&url) {
+                Ok(ix) => {
+                    logf!("index de recherche : {} objets ({})", ix.items.len(), ix.locale);
+                    let mut s = self.shared.lock().unwrap();
+                    s.search_index = Some(ix);
+                    s.version += 1;
+                    drop(s);
+                    (self.notify)();
+                    return;
+                }
+                Err(e) => logf!("index de recherche : {e} ({url})"),
+            }
+        }
+    }
+
+    fn fetch_item(&mut self, key: &str) {
+        // Clé du jeu uniquement (ID_…) : rien d'autre ne part dans l'URL.
+        if !key.starts_with("ID_") || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return;
+        }
+        let tmpl = self.shared.lock().unwrap().search_index.as_ref().map(|i| i.item_url.clone()).filter(|u| u.contains("{item_key}"));
+        let url = match tmpl {
+            Some(t) if t.starts_with(&self.base) => t.replace("{item_key}", key),
+            _ => format!("{}/api/overlay/v1/items/{key}.json", self.base),
+        };
+        match self.get_json::<ItemFile>(&url) {
+            Ok(f) => {
+                logf!("objet {key} : {} points", f.markers.len());
+                let mut s = self.shared.lock().unwrap();
+                s.search_items.insert(key.to_string(), f);
+                s.version += 1;
+                drop(s);
+                (self.notify)();
+            }
+            Err(e) => logf!("objet {key} : {e}"),
+        }
     }
 
     fn fetch_items(&mut self) {

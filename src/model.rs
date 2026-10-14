@@ -145,6 +145,42 @@ pub struct Layer {
     pub markers: Vec<Marker>,
 }
 
+/// Index de recherche d'objets (`items_index[.locale].json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchIndex {
+    #[serde(default)]
+    pub pack_version: String,
+    #[serde(default)]
+    pub locale: String,
+    #[serde(default)]
+    pub item_url: String,
+    #[serde(default)]
+    pub items: Vec<IndexItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexItem {
+    pub item_key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub rarity: Option<String>,
+    #[serde(default)]
+    pub n: u32,
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// Fichier d'un objet (`items/<item_key>.json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemFile {
+    #[serde(default)]
+    pub pack_version: String,
+    pub item_key: String,
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+}
+
 /// `items.json` : où trouver chaque ingrédient de recette (conteneurs + récolte).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemsPack {
@@ -267,6 +303,8 @@ pub struct DrawPoint {
     /// Index du calque (point de calque, pas d'objectif).
     pub layer: Option<usize>,
     pub diamond: bool,
+    /// Loot posé (arme plantée, objet placé, clé au sol).
+    pub placed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -319,7 +357,12 @@ pub struct ViewOpts<'a> {
     pub min_chance: f64,
     pub layers_on: &'a [String],
     pub items: Option<&'a ItemsPack>,
+    /// Objets cherchés : (item_key, nom, marqueurs si déjà chargés).
+    pub searched: Vec<(String, String, Option<&'a [Marker]>)>,
 }
+
+/// Couleurs des objets cherchés (distinctes de la palette des quêtes du site).
+pub const SEARCH_COLORS: [&str; 6] = ["#ffd54f", "#4dd0e1", "#f48fb1", "#aed581", "#ffab91", "#b39ddb"];
 
 pub struct ViewOut {
     pub points: Vec<DrawPoint>,
@@ -365,6 +408,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             locked,
             layer: None,
             diamond: false,
+            placed: mk.source.as_deref() == Some("placed"),
         }
     };
 
@@ -463,7 +507,37 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         out.legend.push(lq);
     }
 
-    // 3. Calques (extractions, lieux, récolte, clés, pièges…), cochés dans le panneau.
+    // 3. Objets cherchés (« Je cherche cet objet »).
+    for (i, (key, name, markers)) in o.searched.iter().enumerate() {
+        let color = parse_color(SEARCH_COLORS[i % SEARCH_COLORS.len()]);
+        let qi = out.legend.len();
+        let mut lq = LegendQuest {
+            quest_id: format!("find:{key}"),
+            title: format!("🔍 {name}"),
+            color,
+            objectives: vec![],
+            on_this_map: 0,
+            filtered: 0,
+            hidden: false,
+        };
+        let mut here = 0;
+        if let Some(ms) = markers {
+            let total_here = ms.iter().filter(|m| m.map == map_id).count();
+            let kept: Vec<&Marker> = ms.iter().filter(|m| keep(m)).collect();
+            lq.filtered += total_here - kept.len();
+            for mk in kept {
+                if let Some((u, v)) = to_uv(mk) {
+                    here += 1;
+                    out.points.push(point(mk, u, v, color, qi, Some(0), false, false, name));
+                }
+            }
+        }
+        lq.on_this_map = here;
+        lq.objectives.push(LegendObjective { label: name.clone(), hint: None, done: false, markers_here: here });
+        out.legend.push(lq);
+    }
+
+    // 4. Calques (extractions, lieux, récolte, clés, pièges…), cochés dans le panneau.
     for (li, ly) in pack.layers.iter().enumerate() {
         let on = o.layers_on.iter().any(|l| *l == ly.id);
         let color = parse_color(&ly.color);
@@ -500,7 +574,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref() };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![] };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();

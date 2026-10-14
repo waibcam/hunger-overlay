@@ -15,6 +15,7 @@ pub const ID_SETTINGS: usize = 101;
 pub const ID_REFRESH: usize = 102;
 pub const ID_UPDATE: usize = 103;
 pub const ID_QUIT: usize = 104;
+pub const ID_SEARCH: usize = 105;
 
 fn copy(dst: &mut [u16], s: &str) {
     let v: Vec<u16> = s.encode_utf16().take(dst.len() - 1).collect();
@@ -80,6 +81,7 @@ pub fn menu(hwnd: HWND, s: &crate::i18n::Strings, update: bool) {
             let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(w.as_ptr()));
         };
         item(ID_SETTINGS, s.menu_settings);
+        item(ID_SEARCH, s.search_title);
         item(ID_REFRESH, s.menu_refresh);
         if update {
             item(ID_UPDATE, s.menu_update);

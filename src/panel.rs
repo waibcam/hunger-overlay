@@ -17,6 +17,8 @@ pub enum Action {
     Language,
     ToggleQuest(String),
     ToggleLayer(String),
+    Search,
+    RemoveSearch(String),
 }
 
 /// Zone cliquable (coordonnées locales au panneau).
@@ -161,6 +163,9 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         }
         x += chip(&mut hits, x, y, t, a.clone(), false) + 6.0 * sc;
     }
+    // Recherche d'objet : sur sa propre ligne.
+    y += row_h + 6.0 * sc;
+    chip(&mut hits, pad, y, s.panel_search, Action::Search, false);
     y += row_h + 10.0 * sc;
     if draw {
         r.line(pad, y - 4.0 * sc, w - pad, y - 4.0 * sc, 1.0, (0.85, 0.75, 0.55, 0.25));
@@ -180,7 +185,14 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         if y > max_h - pad - 10.0 * sc && !draw {
             break;
         }
-        let title = if q.hidden { format!("{}  ({})", q.title, s.panel_hidden) } else { q.title.clone() };
+        let find_key = q.quest_id.strip_prefix("find:");
+        let title = if q.hidden {
+            format!("{}  ({})", q.title, s.panel_hidden)
+        } else if find_key.is_some() {
+            format!("{}  ✕", q.title)
+        } else {
+            q.title.clone()
+        };
         let indent = 20.0 * sc;
         let (_, h) = r.measure(&title, Font::Bold, iw - indent);
         if draw {
@@ -192,7 +204,11 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
             r.stroke_circle(pad + 6.0 * sc, y + h / 2.0, 6.0 * sc, 1.2 * sc, (1.0, 1.0, 1.0, 0.9 * a), false);
             r.text(&title, Font::Bold, pad + indent, y, iw - indent, if q.hidden { DIM } else { TEXT });
         }
-        hits.push(Hit { l: pad - 6.0 * sc, t: y - 2.0 * sc, r: w - pad + 6.0 * sc, b: y + h + 2.0 * sc, action: Action::ToggleQuest(q.quest_id.clone()) });
+        let action = match find_key {
+            Some(k) => Action::RemoveSearch(k.to_string()),
+            None => Action::ToggleQuest(q.quest_id.clone()),
+        };
+        hits.push(Hit { l: pad - 6.0 * sc, t: y - 2.0 * sc, r: w - pad + 6.0 * sc, b: y + h + 2.0 * sc, action });
         y += h + gap;
         if q.hidden {
             continue;
