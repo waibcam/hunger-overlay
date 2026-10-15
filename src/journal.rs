@@ -1189,7 +1189,8 @@ impl Journal {
                 }
                 for e in list {
                     let rh = 36.0 * k;
-                    let added = e.selected || self.d.subjects.iter().any(|x| x.key == e.id);
+                    // The current raid decides (the hub list may predate the last change).
+                    let added = self.d.subjects.iter().any(|x| x.key == e.id);
                     p.mid(&e.name, Font::Name, pad + 24.0 * k, y, rh, 300.0 * k, T100);
                     let rel = match &e.hub {
                         Some(h) => format!("hub · {h}"),
