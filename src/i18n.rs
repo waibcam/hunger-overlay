@@ -377,6 +377,8 @@ pub struct Strings {
     /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
     pub t_avail_you: &'static str,
     /// Toast: the website does not support this change yet.
+    /// Hub member without a website account.
+    pub al_no_account: &'static str,
     pub toast_needs_site: &'static str,
     /// Toast: the progression changed on the website meanwhile (409).
     pub toast_conflict: &'static str,
@@ -609,6 +611,7 @@ pub static FR: Strings = Strings {
     t_added_by_you: "Ajouté par vous",
     t_local_ally: "allié local",
     t_avail_you: "Disponible pour vous aussi",
+    al_no_account: "sans compte",
     toast_needs_site: "Le site ne gère pas encore cette action (mise à jour en cours).",
     toast_conflict: "Votre progression a changé sur le site entre-temps : vérifiez et recommencez.",
 };
@@ -840,6 +843,7 @@ pub static EN: Strings = Strings {
     t_added_by_you: "Added by you",
     t_local_ally: "local ally",
     t_avail_you: "Available for you too",
+    al_no_account: "no account",
     toast_needs_site: "The website does not support this action yet (update in progress).",
     toast_conflict: "Your progression changed on the website meanwhile: check and try again.",
 };

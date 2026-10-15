@@ -236,6 +236,7 @@ pub(crate) const IC_WARN: &str = "\u{E7BA}";
 pub(crate) const IC_CHECK: &str = "\u{E73E}";
 pub(crate) const IC_HIDDEN: &str = "\u{ED1A}";
 pub(crate) const IC_INFO: &str = "\u{E946}";
+pub(crate) const IC_BOOK: &str = "\u{E82D}";
 pub(crate) const IC_ADD_FRIEND: &str = "\u{E8FA}";
 pub(crate) const IC_CLOUD: &str = "\u{E753}";
 pub(crate) const IC_PC: &str = "\u{E7F8}";
@@ -704,6 +705,9 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     let by = (hh - bs) / 2.0 + 2.0 * sc;
     let gx = w - pad + 4.0 * sc - bs;
     let cx = gx - bs - 2.0 * sc;
+    // Quest journal (book icon), collapse, settings.
+    let jx = cx - bs - 2.0 * sc;
+    c.icon_btn(jx, by, IC_BOOK, Action::Journal);
     c.icon_btn(cx, by, if v.collapsed { IC_RIGHT } else { IC_DOWN }, Action::Collapse);
     c.icon_btn(gx, by, IC_SETTINGS, Action::Settings);
     if draw {
@@ -712,7 +716,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         }
         let title = if v.collapsed { "COMPANION" } else { "HUNGER COMPANION" };
         let tx = pad + 16.0 * sc;
-        let (tw, th) = r.measure_spaced(title, Font::Display, cx - tx, 2.0 * sc);
+        let (tw, th) = r.measure_spaced(title, Font::Display, jx - tx, 2.0 * sc);
         r.text_spaced(title, Font::Display, tx, hh / 2.0 + 2.0 * sc - th / 2.0, tw + 4.0, 2.0 * sc, GOLD);
         let dot = if key_problem.is_some() || net_problem.is_some() { WARN } else if v.status.is_none() { (T500.0, T500.1, T500.2) } else { OK };
         let dx = tx + tw + 8.0 * sc;
@@ -731,10 +735,10 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 }
             });
             let sx = dx + 10.0 * sc;
-            c.text_mid(&summary, Font::Chip, sx, 2.0 * sc, hh, cx - sx - 6.0 * sc, if key_problem.is_some() { WARN_TEXT } else { T300 });
+            c.text_mid(&summary, Font::Chip, sx, 2.0 * sc, hh, jx - sx - 6.0 * sc, if key_problem.is_some() { WARN_TEXT } else { T300 });
         }
     }
-    c.push(0.0, 0.0, cx - 2.0 * sc, hh, Action::Move);
+    c.push(0.0, 0.0, jx - 2.0 * sc, hh, Action::Move);
     if v.collapsed {
         let h = hh + 4.0 * sc;
         return Out { h, content_h: h, max_scroll: 0.0, hits: c.hits };
@@ -887,7 +891,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     let quests: Vec<&LegendQuest> = v.legend.iter().filter(|q| q.kind == OwnerKind::Quest).collect();
     let quests_on = v.layers.iter().any(|l| l.id == "quests" && l.on);
     let open_q = !collapsed("quests");
-    y = section(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), Some((s.p_journal.to_string(), Some(Action::Journal))), !open_q);
+    y = section(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), None, !open_q);
     if open_q {
         // Quests with markers here (or hidden, or filtered out) are listed; the others share one line.
         let other = |q: &LegendQuest| !q.hidden && q.on_this_map == 0 && q.filtered == 0 && !v.other_open.contains(&q.quest_id);

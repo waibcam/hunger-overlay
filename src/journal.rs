@@ -177,6 +177,8 @@ pub struct Journal {
     query: String,
     /// Quest to scroll to once painted.
     focus: Option<String>,
+    /// Mouse position (client coordinates; negative = outside the window).
+    mouse: (f32, f32),
 }
 
 /// NUL-terminated UTF-16.
@@ -282,15 +284,18 @@ struct P<'a> {
     r: &'a Renderer,
     k: f32,
     hits: Vec<(f32, f32, f32, f32, Hit)>,
-    hover: Option<usize>,
+    /// Mouse position (client coordinates; negative = outside).
+    mouse: (f32, f32),
     /// Visible body band (zones outside cannot be clicked).
     clip: (f32, f32),
 }
 
 impl P<'_> {
-    /// True if the zone about to be pushed is hovered.
-    fn hov(&self) -> bool {
-        self.hover == Some(self.hits.len())
+    /// True if the mouse is over the rectangle (and inside the visible band). Hover is decided by position, never
+    /// by the order of the zones, so buttons appearing on hover cannot shift it.
+    fn over(&self, l: f32, t: f32, r: f32, b: f32) -> bool {
+        let (x, y) = self.mouse;
+        x >= l && x <= r && y >= t && y <= b && y >= self.clip.0 && y <= self.clip.1
     }
 
     /// Adds a clickable zone (clipped to the visible band).
@@ -316,7 +321,7 @@ impl P<'_> {
         let (tw, _) = self.r.measure(text, Font::Chip, 400.0 * k);
         let iw = if icon.is_some() { 18.0 * k } else { 0.0 };
         let w = tw + iw + 20.0 * k;
-        let hov = self.hov();
+        let hov = self.over(x, y, x + w, y + h);
         let (fill, edge, ink) = match style {
             2 => (if hov { GOLD_HI } else { ACCENT }, (0.0, 0.0, 0.0, 0.0), DARK_INK),
             1 => (if hov { fade(GOLD, 0.22) } else { (0.0, 0.0, 0.0, 0.0) }, fade(GOLD, 0.55), GOLD_HI),
@@ -442,6 +447,7 @@ impl Journal {
                 hover: None,
                 query: String::new(),
                 focus: None,
+                mouse: (-1.0, -1.0),
             };
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
@@ -512,10 +518,13 @@ impl Journal {
         self.redraw();
     }
 
-    /// Mouse moved.
+    /// Mouse moved: repaint when the zone under it (the top-most one) changes, or always inside the body rows.
     fn mouse(&mut self, x: f32, y: f32) {
-        let h = self.hits.iter().position(|z| x >= z.0 && x <= z.2 && y >= z.1 && y <= z.3);
-        if h != self.hover {
+        let old = self.mouse;
+        self.mouse = (x, y);
+        let h = self.hits.iter().rposition(|z| x >= z.0 && x <= z.2 && y >= z.1 && y <= z.3);
+        // Row highlights are not zones of their own: repaint when the mouse moves to another 4 px band too.
+        if h != self.hover || (old.1 / 4.0).floor() != (y / 4.0).floor() {
             self.hover = h;
             self.redraw();
         }
@@ -529,7 +538,8 @@ impl Journal {
 
     /// Click.
     fn click(&mut self, x: f32, y: f32) -> Option<Cmd> {
-        let hit = self.hits.iter().find(|z| x >= z.0 && x <= z.2 && y >= z.1 && y <= z.3).map(|z| z.4.clone())?;
+        // The top-most zone wins (buttons are pushed after the row they sit on, popovers last).
+        let hit = self.hits.iter().rev().find(|z| x >= z.0 && x <= z.2 && y >= z.1 && y <= z.3).map(|z| z.4.clone())?;
         self.act(hit)
     }
 
@@ -623,8 +633,7 @@ impl Journal {
         let (w, h) = (self.w, self.h);
         let pad = 18.0 * k;
         let s = self.s;
-        let hover = self.hover;
-        let mut p = P { r: &self.r, k, hits: vec![], hover, clip: (0.0, h) };
+        let mut p = P { r: &self.r, k, hits: vec![], mouse: self.mouse, clip: (0.0, h) };
         p.r.fill_rrect(0.0, 0.0, w + 4.0, h + 4.0, 0.0, (INK950.0, INK950.1, INK950.2, 1.0));
 
         // 1. Tabs: me, the allies, "+ Ally" (while fewer than 2), and the sync state on the right.
@@ -637,7 +646,7 @@ impl Journal {
             let label = if sub.kind == Kind::Me { format!("{}  {}", sub.name, s.j_you) } else { sub.name.clone() };
             let (tw, _) = p.r.measure(&label, Font::Chip, 300.0 * k);
             let tab_w = tw + 52.0 * k;
-            let hov = p.hov();
+            let hov = p.over(x, ty, x + tab_w, ty + th);
             p.r.fill_rrect(x, ty, x + tab_w, ty + th, 6.0 * k, if sel || hov { INK700 } else { INK800 });
             p.r.stroke_rrect(x + 0.5, ty + 0.5, x + tab_w - 0.5, ty + th - 0.5, 6.0 * k, 1.0, if sel { fade(GOLD, 0.7) } else { (1.0, 1.0, 1.0, 0.08) });
             if sub.kind == Kind::Me {
@@ -650,13 +659,15 @@ impl Journal {
             p.push(x, ty, x + tab_w, ty + th, Hit::Tab(sub.key.clone()));
             x += tab_w + 8.0 * k;
         }
-        if n_allies < 2 || self.tab == ADD_TAB {
+        // Raid management, always available ("+ Ally" while there is room, "Manage" once the raid is full).
+        {
             let sel = self.tab == ADD_TAB;
-            let bw = p.btn_w(true, s.j_add_ally);
+            let label = if n_allies < 2 { s.j_add_ally } else { s.p_manage };
+            let bw = p.btn_w(true, label);
             if sel {
                 p.r.fill_rrect(x - 2.0 * k, ty - 2.0 * k, x + bw + 2.0 * k, ty + th + 2.0 * k, 7.0 * k, fade(GOLD, 0.15));
             }
-            p.btn(x, ty, th, Some(IC_ADD_FRIEND), s.j_add_ally, 1, Hit::Tab(ADD_TAB.into()));
+            p.btn(x, ty, th, Some(IC_ADD_FRIEND), label, 1, Hit::Tab(ADD_TAB.into()));
         }
         let dot = if self.d.synced { OK } else { WARN };
         let (sw, _) = p.r.measure(s.j_synced, Font::Small, 200.0 * k);
@@ -676,7 +687,7 @@ impl Journal {
             p.r.text_center(IC_SEARCH, Font::Icon, pad + 17.0 * k, top + fh / 2.0, T500);
             let rx = w - 186.0 * k;
             let rw = p.btn_w(false, s.j_repeatables) + 22.0 * k;
-            let hov = p.hov();
+            let hov = p.over(rx, top, rx + rw, top + fh);
             p.r.fill_rrect(rx, top, rx + rw, top + fh, 6.0 * k, if hov { INK700 } else { INK800 });
             p.r.stroke_rrect(rx + 0.5, top + 0.5, rx + rw - 0.5, top + fh - 0.5, 6.0 * k, 1.0, (1.0, 1.0, 1.0, 0.08));
             let (bx, bs) = (rx + 10.0 * k, 13.0 * k);
@@ -762,7 +773,7 @@ impl Journal {
                     Next::Available(q) => (q.clone(), State::Available),
                     Next::Waiting(q, _) => (q.clone(), State::Locked),
                 };
-                if p.hov() {
+                if p.over(pad - 6.0 * k, y, w - pad + 6.0 * k, y + rh) {
                     p.r.fill_rrect(pad - 6.0 * k, y, w - pad + 6.0 * k, y + rh, 6.0 * k, HOVER_ROW);
                 }
                 p.push(pad - 6.0 * k, y, pad + 300.0 * k, y + rh, Hit::Strip(qid.clone()));
@@ -821,7 +832,8 @@ impl Journal {
             if !reps.is_empty() {
                 let t = format!("{} · {}", s.j_repeat_avail.replace("{n}", &reps.len().to_string()), if self.repeat { "▴" } else { "▾" });
                 let (tw, _) = p.r.measure(&t, Font::Small, 400.0 * k);
-                p.mid(&t, Font::Small, pad + 132.0 * k, y, 26.0 * k, tw + 2.0, if p.hov() { GOLD_HI } else { GOLD });
+                let hv = p.over(pad + 128.0 * k, y, pad + 136.0 * k + tw, y + 26.0 * k);
+                p.mid(&t, Font::Small, pad + 132.0 * k, y, 26.0 * k, tw + 2.0, if hv { GOLD_HI } else { GOLD });
                 p.push(pad + 128.0 * k, y, pad + 136.0 * k + tw, y + 26.0 * k, Hit::ToggleRepeat);
                 y += 30.0 * k;
             }
@@ -845,7 +857,7 @@ impl Journal {
             let open = self.open.contains(&giver) || !q.is_empty();
             // Header (40): chevron + name, stepper, "n / N done".
             let hh = 40.0 * k;
-            if p.hov() {
+            if p.over(pad - 6.0 * k, y, pad + 170.0 * k, y + hh) {
                 p.r.fill_rrect(pad - 6.0 * k, y, pad + 170.0 * k, y + hh, 6.0 * k, HOVER_ROW);
             }
             p.push(pad - 6.0 * k, y, pad + 170.0 * k, y + hh, Hit::ToggleCard(giver.clone()));
@@ -869,7 +881,7 @@ impl Journal {
                 }
                 let st = g.state(&prog, qid);
                 let sel = self.strip.as_deref() == Some(qid.as_str());
-                if p.hov() || sel {
+                if p.over(x - pitch / 2.0, y + 6.0 * k, x + pitch / 2.0, y + hh - 6.0 * k) || sel {
                     p.r.stroke_circle(x, cy, 10.5 * k, 2.0 * k, GOLD_HI, false);
                 }
                 glyph(p.r, st, self.d.badges.get(qid).filter(|_| sub.kind == Kind::Me), sub.color, x, cy, k * 0.9, 1.0);
@@ -913,7 +925,8 @@ impl Journal {
                     let count = |pre: &str| reps.iter().filter(|r| r.rsplit('.').next().map(|x| x.starts_with(pre)).unwrap_or(false)).count();
                     let t = format!("{} · {}", s.j_repeat_sum.replace("{d}", &count("DQ").to_string()).replace("{w}", &count("WQ").to_string()).replace("{m}", &count("MQ").to_string()), "▾");
                     let (tw, _) = p.r.measure(&t, Font::Small, 500.0 * k);
-                    p.mid(&t, Font::Small, pad + 52.0 * k, y, 26.0 * k, tw + 2.0, if p.hov() { GOLD_HI } else { T500 });
+                    let hv = p.over(pad + 48.0 * k, y, pad + 56.0 * k + tw, y + 26.0 * k);
+                    p.mid(&t, Font::Small, pad + 52.0 * k, y, 26.0 * k, tw + 2.0, if hv { GOLD_HI } else { T500 });
                     p.push(pad + 48.0 * k, y, pad + 56.0 * k + tw, y + 26.0 * k, Hit::ToggleRepeat);
                     y += 28.0 * k;
                 }
@@ -934,8 +947,7 @@ impl Journal {
         let st = g.state(prog, qid);
         let rep = g.is_repeatable(qid);
         let title = self.title(qid);
-        let row_hit = p.hits.len();
-        let hov_row = p.hover.map(|h| h >= row_hit && h < row_hit + 4).unwrap_or(false);
+        let hov_row = p.over(pad + 24.0 * k, y, w - pad + 4.0 * k, y + rh);
         if hov_row {
             p.r.fill_rrect(pad + 24.0 * k, y, w - pad + 4.0 * k, y + rh, 5.0 * k, HOVER_ROW);
         }
@@ -1000,8 +1012,8 @@ impl Journal {
                 acts.push((Some(IC_WARN), s.a_fix.into(), 1, Hit::Strip(qid.to_string())));
             }
         }
-        // Row zone first (hover), then the buttons.
-        p.push(pad + 24.0 * k, y, pad + 52.0 * k + tw, y + rh, Hit::Strip(qid.to_string()));
+        // Row zone first (the whole band), then the buttons on top of it.
+        p.push(pad + 24.0 * k, y, w - pad + 4.0 * k, y + rh, Hit::Strip(qid.to_string()));
         if show {
             for (ic, label, style, hit) in acts {
                 bx -= p.btn_w(ic.is_some(), &label);
@@ -1136,6 +1148,25 @@ impl Journal {
         p.mid(&cnt, Font::Small, w - pad - cw, y, 26.0 * k, cw + 2.0, T500);
         y += 28.0 * k;
         y += p.r.text(s.al_help, Font::Small, pad, y, w - 2.0 * pad, T300) + 14.0 * k;
+        // 0. Current raid allies, each with "Remove from raid".
+        for a in self.d.subjects.iter().filter(|x| x.kind != Kind::Me) {
+            let rh = 36.0 * k;
+            markers::draw(p.r, markers::Kind::Ally, a.color, &a.initial, pad + 12.0 * k, y + rh / 2.0, k, k, 1.0);
+            let (nw, _) = p.r.measure(&a.name, Font::Name, 300.0 * k);
+            p.mid(&a.name, Font::Name, pad + 30.0 * k, y, rh, 300.0 * k, T100);
+            let tag = if a.kind == Kind::Site { s.tag_site } else { s.tag_local };
+            p.r.text_center(if a.kind == Kind::Site { IC_CLOUD } else { IC_PC }, Font::Icon, pad + 42.0 * k + nw, y + rh / 2.0, T500);
+            p.mid(tag, Font::Caps, pad + 54.0 * k + nw, y, rh, 100.0 * k, T500);
+            let bh = 26.0 * k;
+            let rw = p.btn_w(false, s.a_remove_ally);
+            p.btn(w - pad - rw, y + (rh - bh) / 2.0, bh, None, s.a_remove_ally, 0, Hit::Remove(a.key.clone()));
+            let hw = p.btn_w(true, s.a_hide_map);
+            p.btn(w - pad - rw - 8.0 * k - hw, y + (rh - bh) / 2.0, bh, Some(IC_HIDDEN), s.a_hide_map, if a.hidden { 1 } else { 0 }, Hit::Hide(a.key.clone()));
+            y += rh;
+        }
+        if n > 0 {
+            y += 12.0 * k;
+        }
         // 1. From the hub.
         p.r.text_center(IC_CLOUD, Font::Icon, pad + 8.0 * k, y + 13.0 * k, T300);
         p.mid(s.al_hub, Font::Name, pad + 24.0 * k, y, 26.0 * k, w - 2.0 * pad, T100);
@@ -1164,7 +1195,7 @@ impl Journal {
                         Some(h) => format!("hub · {h}"),
                         None => e.relation.clone(),
                     };
-                    let rel = if e.has_account == Some(false) { format!("{rel} · {}", s.tag_local.to_lowercase()) } else { rel };
+                    let rel = if e.has_account == Some(false) { format!("{rel} · {}", s.al_no_account) } else { rel };
                     p.mid(&rel, Font::Small, pad + 260.0 * k, y, rh, 260.0 * k, T500);
                     let bh = 26.0 * k;
                     if added {
