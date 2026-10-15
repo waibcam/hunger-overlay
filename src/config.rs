@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
-use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ};
+use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ};
 
 /// The only site the app talks to by default.
 pub const DEFAULT_BASE_URL: &str = "https://hunger-companion.com";
@@ -24,7 +24,8 @@ pub struct Config {
     pub show_done: bool,
     /// Make the overlay visible in captures (OBS, screenshots).
     pub capture_visible: bool,
-    /// Start the app with Windows (mirrors the Run registry entry, see `set_autostart`).
+    /// Start the app with Windows. The Run registry entry is the reference: this value is re-read from it at
+    /// every start (`autostart_enabled`), so the setting shown always matches what Windows will do.
     pub autostart: bool,
     /// Marker size factor (1.0 = normal).
     pub marker_scale: f32,
@@ -56,6 +57,13 @@ pub struct Config {
     pub panel_pos: Option<(f32, f32)>,
     /// Panel background opacity, in % (20 to 100).
     pub panel_opacity: u32,
+    /// Panel sections collapsed by the user ("quests", "crafting", "search", "layers").
+    pub sections_collapsed: Vec<String>,
+    /// The Quests layer has been switched on at least once (its "NEW" tag is then no longer shown).
+    pub quests_layer_seen: bool,
+    /// Badge slots of the tracked quests: slot i = badge i + 1, "" = free. A quest keeps its number while it is
+    /// tracked, and a newly tracked quest takes the first free number (the website's list order can change).
+    pub quest_slots: Vec<String>,
 }
 
 impl Default for Config {
@@ -80,7 +88,10 @@ impl Default for Config {
             layers_known: vec![],
             search_items: vec![],
             panel_pos: None,
-            panel_opacity: 86,
+            panel_opacity: 85,
+            sections_collapsed: vec![],
+            quests_layer_seen: false,
+            quest_slots: vec![],
         }
     }
 }
@@ -94,6 +105,28 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl Config {
+    /// Updates `quest_slots` for the quests tracked now; returns true if it changed (to be saved).
+    pub fn update_quest_slots(&mut self, tracked: &[&str]) -> bool {
+        let before = self.quest_slots.clone();
+        for s in self.quest_slots.iter_mut() {
+            if !tracked.contains(&s.as_str()) {
+                s.clear();
+            }
+        }
+        for id in tracked {
+            if !self.quest_slots.iter().any(|s| s == id) {
+                match self.quest_slots.iter().position(|s| s.is_empty()) {
+                    Some(i) => self.quest_slots[i] = id.to_string(),
+                    None => self.quest_slots.push(id.to_string()),
+                }
+            }
+        }
+        while self.quest_slots.last().map(|s| s.is_empty()).unwrap_or(false) {
+            self.quest_slots.pop();
+        }
+        self.quest_slots != before
+    }
+
     /// Reads config.json; any missing or unreadable file yields the defaults.
     pub fn load() -> Config {
         std::fs::read_to_string(data_dir().join("config.json"))
@@ -103,7 +136,11 @@ impl Config {
     }
 
     /// Writes config.json atomically (write to a .tmp file, then rename over the old one).
+    /// Never during tests: they must not touch the user's real settings.
     pub fn save(&self) {
+        if cfg!(test) {
+            return;
+        }
         let tmp = data_dir().join("config.json.tmp");
         if std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default()).is_ok() {
             let _ = std::fs::rename(&tmp, data_dir().join("config.json"));
@@ -156,6 +193,13 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
+/// True if the "HungerOverlay" value exists in the user's Run key (the app starts with Windows).
+pub fn autostart_enabled() -> bool {
+    unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), w!("HungerOverlay"), RRF_RT_REG_SZ, None, None, None).is_ok()
+    }
 }
 
 /// Start with Windows (the user's own Run key, no admin rights): adds or removes the "HungerOverlay" value

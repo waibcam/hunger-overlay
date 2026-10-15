@@ -19,20 +19,27 @@ extractions and more appear exactly where they are, and they follow the map as y
 - **Follows zoom and pan.** It follows the mouse wheel and dragging, then re-aligns itself on the image every time the
   map stops moving (typical error: 1–2 px). If it ever loses track, it hides the markers and finds the map again.
 - **Your quests, from your account.** It shows the quests you track on the site, their remaining objectives, and where
-  to go or what to loot.
+  to go or what to loot. Each quest has its own colour and number (1, 2, 3…), drawn inside its markers, so quests can
+  be told apart even without relying on colour.
   - For loot objectives, it shows the containers with their drop chance. A slider sets the minimum chance.
   - It shows harvest nodes, greyed out when they are above your declared gathering level.
-- **Map panel.** You can move it and collapse it, and set its opacity. It also gives you:
-  - quick settings;
-  - one click to hide or show a quest;
-  - optional **layers**: spawn points, extractions, places, harvest (filtered by your levels), placed loot, keys,
-    locked doors and chests, mini-bosses, traps.
+- **Readable on a busy map.** Every marker sits on a dark halo, each kind has its own shape (extraction, spawn, trap,
+  key, lock, mini-boss…), nearby markers of the same quest are grouped with a count, and markers of different quests
+  at the same spot are spread around it. Hovering a marker shows what it is, the drop chance and the objectives there.
+- **Map panel**, in the game's own style. You can move it, collapse it and set its opacity. It also gives you:
+  - quick settings (completed objectives, minimum chance, language);
+  - one click to hide or show a quest, and hovering a quest highlights its markers on the map;
+  - optional **layers**, in groups: spawn points, extractions, mini-bosses, traps, sound traps, placed loot, harvest
+    (filtered by your levels), keys, locked doors and chests, places, and **Quests**.
+- **Discover quests on the map.** The Quests layer shows where the quests you do not track yet take place. Track one
+  with its **+ Track** button in the panel, or with **Ctrl + click** on its marker (with an Undo link). This needs a
+  key that is allowed to change your tracking.
 - **Find an item.** Type a name (in your language) and every place to find it appears on the map.
 - **Find a quest.** Pick a quest in the same search window to start or stop tracking it on your account. This needs a
   key that is allowed to change your tracking.
 - **Crafting list** (site beta). Recipes you want to craft appear like quests, with their ingredients' locations.
-- **Ten languages** for the game data. The interface is in English or French; it follows your site account language,
-  or you can force one.
+- **Ten languages** for the game data. The interface is in English or French. "Auto" follows the Windows language
+  (English when it is not offered), or you can pick one from a list.
 - **Settings window** with a light or dark theme that follows Windows.
 - **Automatic updates.** The new version is downloaded, its SHA-256 checked, and it is installed only when the map is
   not shown.
@@ -82,6 +89,8 @@ cargo build --release          # → target/release/HungerOverlay.exe
   `"base_url": "http://127.0.0.1:8787"` in `%APPDATA%\HungerOverlay\config.json`.
 - Tests:
   - `cargo test --release` runs the unit tests;
+  - `HUNGER_PREVIEW=<dir> cargo test --release preview -- --nocapture` draws the overlay and the panel offline from the
+    cached data, as raw images to composite over a screenshot;
   - `HUNGER_RAWCAPS=<dir> cargo test --release real_captures -- --nocapture` replays real screenshots through the map
     recognition and re-alignment code.
 
@@ -94,8 +103,11 @@ cargo build --release          # → target/release/HungerOverlay.exe
 | `resync.rs` | Visual re-alignment (zoom and pan) on a background thread |
 | `net.rs`, `model.rs` | Website API (contract v1.1) and data model |
 | `panel.rs`, `render.rs` | Map panel and Direct2D rendering |
+| `markers.rs`, `scene.rs` | Marker catalogue and per-frame decluttering (clusters, spread, dense layers) |
 | `settings.rs`, `search.rs`, `tray.rs` | Settings window, search window, tray icon |
 | `update.rs`, `config.rs`, `i18n.rs`, `log.rs` | Updates, settings file, texts, log |
+
+The overlay design is documented in [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## License
 

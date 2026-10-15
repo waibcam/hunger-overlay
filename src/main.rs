@@ -19,12 +19,14 @@ mod config;
 mod detect;
 mod i18n;
 mod log;
+mod markers;
 mod model;
 mod net;
 mod panel;
 mod render;
 mod refs;
 mod resync;
+mod scene;
 mod search;
 mod settings;
 mod tray;
@@ -35,6 +37,7 @@ use detect::{PanelSig, Square};
 use model::{DrawPoint, LegendQuest};
 use net::{Req, SharedRef, Status};
 use render::{Font, Renderer, Rgba};
+use scene::Spot;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::mpsc::Sender;
@@ -138,6 +141,8 @@ struct OpenMap {
     legend: Vec<LegendQuest>,
     /// Extra layers shown in the legend panel.
     layers: Vec<model::LegendLayer>,
+    /// Untracked quests with objectives on this map ("Available on this map").
+    available: Vec<model::AvailQuest>,
     /// Version of the shared data the points were built from (rebuilt when it changes).
     data_version: u64,
 }
@@ -268,6 +273,28 @@ struct App {
     /// Items / index already requested from the network (so they are not requested again in a loop).
     items_requested: HashSet<String>,
     index_requested: bool,
+    /// Markers drawn in the last frame (after decluttering): used for hover, tooltips and Ctrl+click.
+    scene: Vec<scene::Item>,
+    /// Panel spotlight (hovered row or pill): its markers stay bright, the others are dimmed.
+    spot: Option<Spot>,
+    /// Spotlight about to change (it follows the hover after a short delay, so moving across rows does not flicker).
+    spot_pending: Option<(Option<Spot>, Instant)>,
+    /// When the current spotlight started (pulse animation).
+    spot_start: Instant,
+    /// Scroll offset of the panel body.
+    panel_scroll: f32,
+    /// Message under the panel header and when it appeared.
+    toast: Option<(panel::Toast, Instant)>,
+    /// Last quest tracked from the app (quest id, title), for "Undo".
+    last_track: Option<(String, String)>,
+    /// Quest tracked a few seconds ago (gets a "NEW" tag in the panel).
+    recent_track: Option<(String, Instant)>,
+    /// "Available on this map" fully listed.
+    avail_open: bool,
+    /// Tracked quests with nothing on this map that the user expanded in the panel.
+    other_open: Vec<String>,
+    /// The panel's language list is open.
+    lang_open: bool,
 }
 
 /// Saves the last map seen (for this screen size) to disk: map, default square, help panel.
@@ -441,14 +468,9 @@ impl App {
         }
     }
 
-    /// Label of the current language for the panel ("Auto (XX)" when it follows the account / system).
+    /// Label of the current language for the panel ("Auto (XX)" when it follows Windows).
     fn lang_label(&self) -> String {
-        if self.cfg.locale.is_empty() {
-            let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
-            format!("Auto ({})", i18n::effective("", account.as_deref()).to_uppercase())
-        } else {
-            self.cfg.locale.to_uppercase()
-        }
+        i18n::lang_name(&self.cfg.locale)
     }
 
     /// Mouse button pressed on the panel: starts moving it if it is the grip.
@@ -489,11 +511,58 @@ impl App {
             self.panel_hover = h;
             self.dirty = true;
         }
+        // Spotlight what the hovered row / pill stands for (applied after a short delay by `tick`).
+        let want = h.and_then(|i| self.panel_hits.get(i)).and_then(|h| self.spot_for(&h.action));
+        let pending_same = self.spot_pending.as_ref().map(|p| p.0 == want).unwrap_or(false);
+        if want != self.spot && !pending_same {
+            self.spot_pending = Some((want, Instant::now()));
+        } else if want == self.spot {
+            self.spot_pending = None;
+        }
+    }
+
+    /// What a panel zone spotlights on the map, if anything.
+    fn spot_for(&self, a: &panel::Action) -> Option<Spot> {
+        let MapState::Open(m) = &self.state else { return None };
+        match a {
+            panel::Action::ToggleQuest(id) | panel::Action::ExpandOther(id) => m.legend.iter().position(|q| q.quest_id == *id).map(Spot::Owner),
+            panel::Action::RemoveSearch(k) => m.legend.iter().position(|q| q.quest_id == format!("find:{k}")).map(Spot::Owner),
+            panel::Action::ToggleLayer(id) => m.layers.iter().position(|l| l.id == *id && l.on).map(Spot::Layer),
+            panel::Action::Track(q) | panel::Action::AvailRow(q) => Some(Spot::Quest(q.clone())),
+            _ => None,
+        }
+    }
+
+    /// Mouse wheel over the panel: scrolls its body (3 rows per notch). The game does not receive it.
+    fn panel_wheel(&mut self, delta: i16) {
+        self.panel_scroll = (self.panel_scroll - delta as f32 / 120.0 * 90.0 * self.sc()).max(0.0);
+        self.dirty = true;
+    }
+
+    /// Starts (or stops) tracking a quest on the website account and shows the result in the panel.
+    /// This is the app's only write to the website (`POST /me/track`, see `net.rs`); it happens only on an
+    /// explicit user action (Ctrl+click on a Quests-layer marker, "+ Track", "Undo", or the search window).
+    fn track_quest(&mut self, qid: String, title: String, tracked: bool) {
+        logf!("track {qid} → {tracked}");
+        let _ = self.net.send(Req::Track { quest_id: qid.clone(), tracked });
+        let s = self.s;
+        let text = format!("{} {title}", if tracked { s.toast_tracking } else { s.toast_undone });
+        self.toast = Some((panel::Toast { text, ok: true, undo: tracked }, Instant::now()));
+        self.last_track = tracked.then(|| (qid.clone(), title));
+        self.recent_track = tracked.then(|| (qid, Instant::now()));
+        self.dirty = true;
     }
 
     /// Click in the panel: quick settings are applied and saved immediately.
     fn panel_click(&mut self, x: f32, y: f32) {
-        let Some(hit) = self.panel_hits.iter().find(|h| h.contains(x, y)).cloned() else { return };
+        let Some(hit) = self.panel_hits.iter().find(|h| h.contains(x, y)).cloned() else {
+            // A click outside the open language list closes it.
+            if self.lang_open {
+                self.lang_open = false;
+                self.dirty = true;
+            }
+            return;
+        };
         match hit.action {
             panel::Action::Move => return,
             panel::Action::Settings => {
@@ -502,12 +571,24 @@ impl App {
             }
             panel::Action::Collapse => self.cfg.panel_collapsed = !self.cfg.panel_collapsed,
             panel::Action::ToggleDone => self.cfg.show_done = !self.cfg.show_done,
-            panel::Action::ChanceDown => self.cfg.min_chance = self.cfg.min_chance.saturating_sub(5) / 5 * 5,
-            panel::Action::ChanceUp => self.cfg.min_chance = ((self.cfg.min_chance / 5 + 1) * 5).min(50),
+            panel::Action::ChanceDown => self.cfg.min_chance = panel::chance_down(self.cfg.min_chance),
+            panel::Action::ChanceUp => self.cfg.min_chance = panel::chance_up(self.cfg.min_chance),
+            panel::Action::RevealFilter(v) => self.cfg.min_chance = v,
+            // Language chip: opens / closes the language list.
             panel::Action::Language => {
-                let order: Vec<&str> = std::iter::once("").chain(i18n::LANGS.iter().map(|l| l.0)).collect();
-                let i = order.iter().position(|c| *c == self.cfg.locale).unwrap_or(0);
-                self.cfg.locale = order[(i + 1) % order.len()].to_string();
+                self.lang_open = !self.lang_open;
+                self.dirty = true;
+                return;
+            }
+            // A language picked in the list: one data reload, only if it really changed.
+            panel::Action::SetLang(code) => {
+                self.lang_open = false;
+                self.dirty = true;
+                if code == self.cfg.locale {
+                    return;
+                }
+                self.cfg.locale = code;
+                self.s = i18n::t_for(&self.cfg.locale);
                 self.configure_net();
                 let _ = self.net.send(Req::Refresh { force: true });
             }
@@ -518,12 +599,58 @@ impl App {
             panel::Action::RemoveSearch(key) => {
                 self.cfg.search_items.retain(|k| *k != key);
             }
+            panel::Action::ClearSearches => self.cfg.search_items.clear(),
             panel::Action::ToggleLayer(id) => {
                 if let Some(p) = self.cfg.layers_on.iter().position(|q| *q == id) {
                     self.cfg.layers_on.remove(p);
                 } else {
+                    self.cfg.quests_layer_seen |= id == "quests";
                     self.cfg.layers_on.push(id);
                 }
+            }
+            // Group label: everything off if any layer of the group is on, otherwise everything on.
+            panel::Action::ToggleGroup(ids) => {
+                if ids.iter().any(|id| self.cfg.layers_on.contains(id)) {
+                    self.cfg.layers_on.retain(|l| !ids.contains(l));
+                } else {
+                    self.cfg.quests_layer_seen |= ids.iter().any(|i| i == "quests");
+                    self.cfg.layers_on.extend(ids);
+                }
+            }
+            panel::Action::ToggleSection(id) => {
+                if let Some(p) = self.cfg.sections_collapsed.iter().position(|q| *q == id) {
+                    self.cfg.sections_collapsed.remove(p);
+                } else {
+                    self.cfg.sections_collapsed.push(id);
+                }
+                self.cfg.save();
+                self.dirty = true;
+                return;
+            }
+            panel::Action::Track(qid) => {
+                let title = match &self.state {
+                    MapState::Open(m) => m.available.iter().find(|a| a.quest_id == qid).map(|a| a.title.clone()).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.track_quest(qid, title, true);
+                return;
+            }
+            panel::Action::Undo => {
+                if let Some((qid, title)) = self.last_track.take() {
+                    self.track_quest(qid, title, false);
+                }
+                return;
+            }
+            panel::Action::AvailRow(_) => return,
+            panel::Action::MoreAvail => {
+                self.avail_open = !self.avail_open;
+                self.dirty = true;
+                return;
+            }
+            panel::Action::ExpandOther(id) => {
+                self.other_open.push(id);
+                self.dirty = true;
+                return;
             }
             panel::Action::ToggleQuest(id) => {
                 if let Some(p) = self.cfg.hidden_quests.iter().position(|q| *q == id) {
@@ -649,28 +776,22 @@ impl App {
             m.n_b = (m.n_b + d.signum()).clamp(0, ZOOM_MAX_N);
             m.n = if per_event { m.n_b } else { m.n_a };
         }
-        // Left button pressed on the map (not on the game's help panel): a drag (pan) starts.
         // Ctrl + click on a "Quests" layer marker: start tracking that quest on the account. The click itself is not
-        // blocked (the game receives it as usual); we only read it.
+        // blocked (the game receives it as usual); we only read it. A cluster tracks its first quest.
         let ctrl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) } < 0;
-        if flags & LEFT_DOWN != 0 && ctrl {
-            let (lx, ly) = ((pos.0 - gx) as f64, (pos.1 - gy) as f64);
-            let lim = (9.0 * (gh as f64 / 1440.0).max(0.5)) + 8.0;
-            let hit = m
-                .points
-                .iter()
-                .filter(|p| p.quest_ref.is_some())
-                .map(|p| (p, m.project(p.u, p.v)))
-                .filter(|(_, (x, y))| (x - lx).powi(2) + (y - ly).powi(2) < lim * lim)
-                .min_by(|a, b| ((a.1 .0 - lx).powi(2) + (a.1 .1 - ly).powi(2)).total_cmp(&((b.1 .0 - lx).powi(2) + (b.1 .1 - ly).powi(2))))
-                .and_then(|(p, _)| p.quest_ref.clone());
+        if flags & LEFT_DOWN != 0 && ctrl && !m.uncertain {
+            let (lx, ly) = ((pos.0 - gx) as f32, (pos.1 - gy) as f32);
+            let hit = self.items_at(lx, ly).into_iter().find_map(|i| {
+                let MapState::Open(m) = &self.state else { return None };
+                self.scene[i].members.iter().find_map(|&pi| m.points.get(pi).and_then(|p| p.quest_ref.clone()))
+            });
             if let Some((qid, title)) = hit {
-                logf!("Ctrl+click: track {qid}");
-                let _ = self.net.send(Req::Track { quest_id: qid, tracked: true });
-                tray::balloon(self.main, "Hunger Overlay", &format!("✔ {title}"));
+                self.track_quest(qid, title, true);
                 return;
             }
         }
+        let MapState::Open(m) = &mut self.state else { return };
+        // Left button pressed on the map (not on the game's help panel): a drag (pan) starts.
         if flags & LEFT_DOWN != 0 {
             let (cx, cy) = pos;
             let (lx, ly) = ((cx - gx) as f64, (cy - gy) as f64);
@@ -771,6 +892,27 @@ impl App {
         // The overlay is visible only while the game (or one of our windows) is in front and the map is open and located.
         let visible = (game.is_some() || ours_fg())
             && matches!(&self.state, MapState::Open(m) if m.closing_check.is_none() && !m.wide_pending && !m.resync_at.map(|r| r.1).unwrap_or(false));
+        // Spotlight follows the panel hover after 150 ms (200 ms to clear); its pulse animates for 1.8 s.
+        if let Some((want, since)) = &self.spot_pending {
+            let delay = if want.is_some() { 150 } else { 200 };
+            if now.duration_since(*since) >= Duration::from_millis(delay) {
+                self.spot = want.clone();
+                self.spot_pending = None;
+                self.spot_start = now;
+                self.dirty = true;
+            }
+        }
+        if self.spot.is_some() && now.duration_since(self.spot_start) < Duration::from_millis(1900) {
+            self.dirty = true;
+        }
+        if self.toast.as_ref().map(|t| now.duration_since(t.1) > Duration::from_secs(if t.0.undo { 8 } else if t.0.ok { 5 } else { 9 })).unwrap_or(false) {
+            self.toast = None;
+            self.dirty = true;
+        }
+        if self.recent_track.as_ref().map(|t| now.duration_since(t.1) > Duration::from_secs(10)).unwrap_or(false) {
+            self.recent_track = None;
+            self.dirty = true;
+        }
         if visible {
             let hov = self.compute_hover();
             if hov != self.hover {
@@ -1007,6 +1149,7 @@ impl App {
             points: vec![],
             legend: vec![],
             layers: vec![],
+            available: vec![],
             data_version: u64::MAX,
         }
     }
@@ -1094,9 +1237,8 @@ impl App {
     /// Also picks up what the network thread has received (status, key validation, update notice, search
     /// data) and asks it for missing search data. No game data is involved: everything comes from the website.
     fn sync_data(&mut self) {
-        // Interface language: forced, otherwise the website account's language, otherwise Windows' (English by default).
-        let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
-        let s = i18n::strings_for(&i18n::effective(&self.cfg.locale, account.as_deref()));
+        // Interface language: the one chosen in the settings, otherwise Windows' (English when not offered).
+        let s = i18n::t_for(&self.cfg.locale);
         if !std::ptr::eq(s, self.s) {
             self.s = s;
             self.dirty = true;
@@ -1146,8 +1288,15 @@ impl App {
                 "readonly" => self.s.track_readonly,
                 _ => self.s.track_failed,
             };
-            self.balloon_url = (n == "readonly").then(|| format!("{}/account/security#overlay-keys", self.cfg.base_url.trim_end_matches('/')));
-            tray::balloon(self.main, "Hunger Overlay", msg);
+            self.toast = Some((panel::Toast { text: msg.to_string(), ok: false, undo: false }, Instant::now()));
+            self.recent_track = None;
+            self.last_track = None;
+            self.dirty = true;
+            // Read-only key: the tray notification links to the website page where the key can be changed.
+            if n == "readonly" {
+                self.balloon_url = Some(format!("{}/account/security#overlay-keys", self.cfg.base_url.trim_end_matches('/')));
+                tray::balloon(self.main, "Hunger Overlay", msg);
+            }
         }
         // New layers published by the website: remember them and switch on those that are on by default.
         if let Some(p) = sh.pack.as_ref() {
@@ -1156,7 +1305,8 @@ impl App {
                 let id = if ly.id.starts_with("harvest_") { "harvest".to_string() } else { ly.id.clone() };
                 if !self.cfg.layers_known.contains(&id) {
                     self.cfg.layers_known.push(id.clone());
-                    if ly.default_on && !self.cfg.layers_on.contains(&id) {
+                    // Website default, plus Extractions (always useful) on first sight.
+                    if (ly.default_on || id == "extractions") && !self.cfg.layers_on.contains(&id) {
                         self.cfg.layers_on.push(id);
                     }
                     changed = true;
@@ -1164,6 +1314,16 @@ impl App {
             }
             if changed {
                 self.cfg.save();
+            }
+        }
+        // Stable quest numbers: each tracked quest keeps its badge slot.
+        if let Some(t) = sh.tracker.as_ref() {
+            let ids: Vec<&str> = t.tracked.iter().filter(|q| !q.completed).map(|q| q.quest_id.as_str()).collect();
+            if self.cfg.update_quest_slots(&ids) {
+                self.cfg.save();
+                if let MapState::Open(m) = &mut self.state {
+                    m.data_version = u64::MAX;
+                }
             }
         }
         // Rebuild the markers / legend of the open map if the data or the display options changed.
@@ -1192,15 +1352,18 @@ impl App {
                 searched,
                 harvest_title: self.s.harvest_layer,
                 quests_title: self.s.quests_layer,
+                slots: &self.cfg.quest_slots,
             };
             let v = model::build_view(p, t, &opts);
             m.points = v.points;
             m.legend = v.legend;
             m.layers = v.layers;
+            m.available = v.available;
         } else {
             m.points.clear();
             m.legend.clear();
             m.layers.clear();
+            m.available.clear();
         }
         self.dirty = true;
     }
@@ -1335,34 +1498,45 @@ impl App {
         apply.then_some(true)
     }
 
-    /// Marker radius in pixels (scaled with the window size and the user's marker-size setting).
-    fn marker_r(&self) -> f64 {
-        (9.0 * self.sc() * self.cfg.marker_scale).max(5.0) as f64
+    /// Marker size factor: UI scale × the user's marker-size setting.
+    fn marker_k(&self) -> f32 {
+        (self.sc() * self.cfg.marker_scale).max(0.45)
     }
 
-    /// Index of the marker closest to the mouse cursor (within the marker radius), for the tooltip.
+    /// Zoom metric Z of the open map: 1 = the game's default (fully zoomed-out) view.
+    fn zoom_z(&self, m: &OpenMap) -> f32 {
+        (m.zoom * m.sq.side / (0.9486 * self.client.3.max(1) as f64)) as f32
+    }
+
+    /// Markers of the last frame under a point (client coordinates), closest first.
+    fn items_at(&self, lx: f32, ly: f32) -> Vec<usize> {
+        let (k, sc) = (self.marker_k(), self.sc());
+        let mut v: Vec<(f32, usize)> = self
+            .scene
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| {
+                let lim = (it.radius(k) * 1.25).max(12.0 * sc) + 4.0 * sc;
+                let d = (it.x - lx).powi(2) + (it.y - ly).powi(2);
+                (d < lim * lim).then_some((d, i))
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v.into_iter().map(|x| x.1).collect()
+    }
+
+    /// Marker under the mouse cursor (tooltip), identified by the first point it stands for.
     fn compute_hover(&self) -> Option<usize> {
         let MapState::Open(m) = &self.state else { return None };
-        if m.drag.is_some() {
+        if m.drag.is_some() || m.uncertain {
             return None;
         }
         let (cx, cy) = cursor();
         if self.over_panel(cx, cy) {
             return None;
         }
-        let (lx, ly) = ((cx - self.client.0) as f64, (cy - self.client.1) as f64);
-        let lim = self.marker_r() + 6.0;
-        let mut best = None;
-        let mut bd = lim * lim;
-        for (i, p) in m.points.iter().enumerate() {
-            let (x, y) = m.project(p.u, p.v);
-            let d = (x - lx).powi(2) + (y - ly).powi(2);
-            if d < bd {
-                bd = d;
-                best = Some(i);
-            }
-        }
-        best
+        let (lx, ly) = ((cx - self.client.0) as f32, (cy - self.client.1) as f32);
+        self.items_at(lx, ly).first().map(|&i| self.scene[i].members[0])
     }
 
     // ---------- Drawing ----------
@@ -1374,6 +1548,8 @@ impl App {
             self.panel_shown = on;
             if !on {
                 self.panel_hover = None;
+                self.spot = None;
+                self.spot_pending = None;
             }
             unsafe {
                 let _ = ShowWindow(self.panel, if on { SW_SHOWNOACTIVATE } else { SW_HIDE });
@@ -1381,11 +1557,14 @@ impl App {
         }
     }
 
-    /// Redraws the overlay: markers projected onto the map, then the legend panel and the tooltip.
+    /// Redraws the overlay: the panel (its own window), then the markers projected onto the map, place labels and
+    /// the tooltip of the hovered marker (docs/DESIGN.md §4–6).
     fn draw(&mut self) {
         let lang_label = self.lang_label();
         let (gx, gy, gw, gh) = self.client;
         let sc = self.sc();
+        let k = self.marker_k();
+        let now = Instant::now();
         let _ = self.renderer.set_font_scale(sc);
         if !self.renderer.begin(gw, gh) {
             return;
@@ -1394,87 +1573,10 @@ impl App {
             self.renderer.present(self.overlay, gx, gy);
             return;
         };
-        // Markers: skipped while the position is uncertain, and clipped to the window and to the map texture.
-        let r = &self.renderer;
-        let rad = self.marker_r() as f32;
-        let hide_points = m.uncertain;
-        let (mx0, my0) = m.project(0.0, 0.0);
-        let (mx1, my1) = m.project(1.0, 1.0);
-        for (i, p) in m.points.iter().enumerate() {
-            if hide_points {
-                break;
-            }
-            let (x, y) = m.project(p.u, p.v);
-            let (x, y) = (x as f32, y as f32);
-            if x < -20.0 || y < -20.0 || x > gw as f32 + 20.0 || y > gh as f32 + 20.0 {
-                continue;
-            }
-            if (x as f64) < mx0 || (x as f64) > mx1 || (y as f64) < my0 || (y as f64) > my1 {
-                continue;
-            }
-            let hov = self.hover == Some(i);
-            let rr = if hov { rad * 1.35 } else { rad };
-            let c: Rgba = (p.color.0, p.color.1, p.color.2, if p.locked { 0.45 } else { 1.0 });
-            let layer_id = p.layer.and_then(|li| m.layers.get(li)).map(|l| l.id.as_str());
-            if p.place || layer_id == Some("places") {
-                // Named place: clearly visible filled diamond + its name next to it.
-                let dr = rad * 1.25;
-                let gold: Rgba = if p.place { c } else { (0.95, 0.78, 0.35, 1.0) };
-                r.diamond(x, y, dr, 7.0 * sc, (0.0, 0.0, 0.0, 0.75));
-                r.diamond(x, y, dr * 0.55, dr * 0.9, (0.1, 0.08, 0.05, 0.85));
-                r.diamond(x, y, dr, 2.6 * sc, gold);
-                if !p.label.is_empty() {
-                    let tw = r.measure(&p.label, Font::Small, 400.0 * sc).0;
-                    let (lx, ly) = (x + dr + 5.0 * sc, y - 9.0 * sc);
-                    r.fill_rrect(lx - 3.0 * sc, ly - 1.0 * sc, lx + tw + 4.0 * sc, ly + 18.0 * sc, 3.0 * sc, (0.05, 0.04, 0.03, 0.72));
-                    r.text(&p.label, Font::Small, lx, ly, tw + 2.0, (0.97, 0.92, 0.8, 1.0));
-                }
-            } else if layer_id == Some("player_spawns") {
-                // Player spawn point: large, high-contrast circle.
-                let sr = rad * 1.05;
-                r.fill_circle(x, y, sr + 3.0 * sc, (0.0, 0.0, 0.0, 0.7));
-                r.fill_circle(x, y, sr, c);
-                r.stroke_circle(x, y, sr, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
-                r.stroke_circle(x, y, sr * 0.45, 2.0 * sc, (1.0, 1.0, 1.0, 0.95), false);
-            } else if p.layer.is_some() {
-                // Layer point: smaller and more discreet than the objectives.
-                let lr = rr * 0.62;
-                if p.diamond {
-                    r.diamond(x, y, lr * 1.35, 3.5 * sc, (0.0, 0.0, 0.0, 0.7));
-                    r.diamond(x, y, lr * 1.35, 1.8 * sc, c);
-                } else {
-                    r.fill_circle(x, y, lr + 1.5 * sc, (0.0, 0.0, 0.0, 0.6));
-                    r.fill_circle(x, y, lr, c);
-                }
-            } else if p.placed {
-                // Placed loot: filled diamond.
-                r.diamond(x, y, rr * 1.15, 6.0 * sc, (0.0, 0.0, 0.0, 0.6));
-                r.diamond(x, y, rr * 1.15, 3.5 * sc, c);
-                r.diamond(x, y, rr * 0.6, 4.5 * sc, c);
-            } else if p.harvest.is_some() {
-                // Harvest node: rounded square (greyed out if the required level is above the player's).
-                let hr = rr * 0.95;
-                r.fill_rrect(x - hr - 2.0 * sc, y - hr - 2.0 * sc, x + hr + 2.0 * sc, y + hr + 2.0 * sc, 3.0 * sc, (0.0, 0.0, 0.0, 0.55));
-                r.fill_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, c);
-                r.stroke_rrect(x - hr, y - hr, x + hr, y + hr, 2.5 * sc, 1.4 * sc, (1.0, 1.0, 1.0, if p.locked { 0.5 } else { 0.95 }));
-            } else if p.done {
-                // Completed objective: small grey circle.
-                r.fill_circle(x, y, rr * 0.8, (0.35, 0.35, 0.35, 0.65));
-                r.stroke_circle(x, y, rr * 0.8, 1.5 * sc, (0.9, 0.9, 0.9, 0.7), false);
-            } else {
-                // Quest objective: coloured disc with a white ring and centre (dashed outer ring if optional).
-                r.fill_circle(x, y, rr + 2.5 * sc, (0.0, 0.0, 0.0, 0.55));
-                r.fill_circle(x, y, rr, c);
-                r.stroke_circle(x, y, rr, 1.6 * sc, (1.0, 1.0, 1.0, 0.95), false);
-                r.fill_circle(x, y, rr * 0.28, (1.0, 1.0, 1.0, 0.95));
-                if p.optional {
-                    r.stroke_circle(x, y, rr + 5.0 * sc, 1.5 * sc, c, true);
-                }
-            }
-        }
-        // Panel: to the right of the map by default, or wherever the user moved it (position stored as
-        // fractions of the window, so it stays valid at another resolution).
-        let max_w = if self.cfg.panel_collapsed { 300.0 } else { 430.0 } * sc;
+
+        // 1. Panel: to the right of the map by default, or wherever the user moved it (position stored as
+        //    fractions of the window, so it stays valid at another resolution).
+        let max_w = if self.cfg.panel_collapsed { 360.0 } else { 430.0 } * sc;
         let (right, top, lw) = match self.cfg.panel_pos {
             Some((fx, fy)) => {
                 let x = (fx * gw as f32).clamp(0.0, (gw as f32 - 200.0 * sc).max(0.0));
@@ -1487,86 +1589,209 @@ impl App {
         };
         let mut legend_rect = None;
         if lw > 180.0 * sc {
-            let view = panel::View {
+            let sq_bottom = (m.sq.y0 + m.sq.side) as f32;
+            let max_h = (sq_bottom.min(gh as f32 - 20.0 * sc) - top).max(260.0 * sc).min(gh as f32 - top - 8.0 * sc);
+            let mut view = panel::View {
                 s: self.s,
                 legend: &m.legend,
                 layers: &m.layers,
+                available: &m.available,
                 status: self.last_status.as_ref(),
                 show_done: self.cfg.show_done,
                 min_chance: self.cfg.min_chance,
                 lang_label,
                 collapsed: self.cfg.panel_collapsed,
                 opacity: self.cfg.panel_opacity.clamp(20, 100) as f32 / 100.0,
+                sections_collapsed: &self.cfg.sections_collapsed,
+                toast: self.toast.as_ref().map(|t| &t.0),
+                avail_open: self.avail_open,
+                other_open: &self.other_open,
+                lang_open: self.lang_open,
+                locale: &self.cfg.locale,
+                quests_new: !self.cfg.quests_layer_seen,
+                recent: self.recent_track.as_ref().map(|t| t.0.as_str()),
+                uncertain: m.uncertain,
+                compact: 0,
+                scroll: 0.0,
             };
             let _ = self.prenderer.set_font_scale(sc);
-            let (h, _) = panel::layout(&self.prenderer, &view, lw.floor(), (gh as f32 - top - 20.0 * sc).max(100.0), sc, None, false);
-            let (pw, ph) = (lw.floor() as i32, h.ceil() as i32);
-            if self.prenderer.begin(pw, ph) {
-                let (_, hits) = panel::layout(&self.prenderer, &view, pw as f32, ph as f32, sc, self.panel_hover, true);
+            let pw = lw.floor();
+            // Overflow: fold more and more (§4.5) until it fits, then scroll.
+            let mut out = panel::layout(&self.prenderer, &view, pw, max_h, sc, None, false);
+            while out.content_h > max_h && view.compact < 4 {
+                view.compact += 1;
+                out = panel::layout(&self.prenderer, &view, pw, max_h, sc, None, false);
+            }
+            self.panel_scroll = self.panel_scroll.clamp(0.0, out.max_scroll);
+            view.scroll = self.panel_scroll;
+            let ph = out.h.ceil();
+            // The image is a little larger than the panel, for its drop shadow.
+            let (iw, ih) = ((pw + 4.0 * sc).ceil() as i32, (ph + 6.0 * sc).ceil() as i32);
+            if self.prenderer.begin(iw, ih) {
+                self.prenderer.fill_rrect(3.0 * sc, 5.0 * sc, pw + 3.0 * sc, ph + 5.0 * sc, 7.0 * sc, (0.0, 0.0, 0.0, 0.25));
+                let out = panel::layout(&self.prenderer, &view, pw, ph, sc, self.panel_hover, true);
                 self.prenderer.present(self.panel, gx + right as i32, gy + top as i32);
-                self.panel_hits = hits;
+                self.panel_hits = out.hits;
             }
-            legend_rect = Some((right, top, right + pw as f32, top + ph as f32));
+            legend_rect = Some((right, top, right + pw, top + ph));
         }
-        // Tooltip for the hovered marker.
-        if let Some(i) = self.hover.filter(|_| !hide_points) {
-            if let Some(p) = m.points.get(i) {
-                let (x, y) = m.project(p.u, p.v);
-                let lq = m.legend.get(p.quest);
-                let title = match (&p.quest_ref, p.layer) {
-                    (Some((_, qt)), _) => qt.as_str(),
-                    (None, Some(li)) => m.layers.get(li).map(|l| l.title.as_str()).unwrap_or(""),
-                    (None, None) => lq.map(|q| q.title.as_str()).unwrap_or(""),
-                };
-                // Tooltip = this point only: the objective, then the container and ITS chance.
-                // (The "Best: … · Enemies: …" summary is about the whole objective: it stays in the panel.)
-                let mut lines = vec![];
-                let obj = p.objective.and_then(|oi| lq.and_then(|q| q.objectives.get(oi)));
-                if let Some(o) = obj {
-                    lines.push(o.label.clone());
-                }
-                if p.quest_ref.is_some() {
-                    // Quest-layer marker: the objective, then how to start tracking the quest.
-                    lines.push(p.label.clone());
-                    lines.push(self.s.tip_track_hint.to_string());
-                } else if let Some(h) = &p.harvest {
-                    let node = h.node.clone().unwrap_or_default();
-                    let mut l = format!("{} : {node}", self.s.tip_harvest);
-                    if let Some(pr) = &h.profession {
-                        l += &format!(" · {pr}");
-                    }
-                    if let Some(c) = p.chance {
-                        l += &format!(" · {:.0} % {}", c * 100.0, self.s.tip_chance);
-                    }
-                    lines.push(l);
-                    if let Some(lv) = h.level {
-                        let you = h.player.map(|pl| format!(" ({} : {pl})", self.s.tip_you)).unwrap_or_default();
-                        lines.push(format!("{} : {lv}{you}", self.s.tip_level));
-                    }
-                } else if p.placed {
-                    let pct = p.chance.map(|c| format!(" · {} % {}", if c * 100.0 >= 1.0 { format!("{:.0}", c * 100.0) } else { format!("{:.2}", c * 100.0) }, self.s.tip_chance)).unwrap_or_default();
-                    lines.push(format!("{}{pct}", self.s.tip_placed));
-                } else { match p.chance {
-                    Some(c) => {
-                        let container = p.container.as_deref().or_else(|| p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(str::trim)).filter(|t| !t.is_empty());
-                        let pct = c * 100.0;
-                        let pct = if pct >= 10.0 { format!("{pct:.0}") } else { format!("{pct:.1}") };
-                        match container {
-                            Some(k) => lines.push(format!("{} : {k} · {pct} % {}", self.s.tip_container, self.s.tip_chance)),
-                            None => lines.push(format!("{} · {pct} % {}", p.label, self.s.tip_chance)),
-                        }
-                    }
-                    None => {
-                        if !p.label.is_empty() && obj.map(|o| o.label != p.label && !p.label.starts_with(&o.label)).unwrap_or(true) {
-                            lines.push(p.label.clone());
-                        }
-                    }
-                } }
-                draw_tooltip(r, title, p.color, &lines, x as f32, y as f32, gw as f32, gh as f32, sc);
+
+        // 2. Markers: skipped while the position is uncertain, and clipped to the window and to the map texture.
+        let r = &self.renderer;
+        let (mx0, my0) = m.project(0.0, 0.0);
+        let (mx1, my1) = m.project(1.0, 1.0);
+        let visible: Vec<(usize, f32, f32)> = if m.uncertain {
+            vec![]
+        } else {
+            m.points
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let (x, y) = m.project(p.u, p.v);
+                    let inside = x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && x > -20.0 && y > -20.0 && x < gw as f64 + 20.0 && y < gh as f64 + 20.0;
+                    // Not under the panel (it is translucent: markers would show through it).
+                    let under_panel = legend_rect.map(|(l, t, r, b)| x as f32 > l - 4.0 && (x as f32) < r + 4.0 && y as f32 > t - 4.0 && (y as f32) < b + 4.0).unwrap_or(false);
+                    (inside && !under_panel).then_some((i, x as f32, y as f32))
+                })
+                .collect()
+        };
+        let z = self.zoom_z(m);
+        let items = scene::build(&scene::Input { visible: &visible, points: &m.points, legend: &m.legend, layers: &m.layers, zoom: z, sc, spot: self.spot.as_ref() });
+        let hovered = self.hover.and_then(|h| items.iter().position(|it| it.members[0] == h));
+        let lit = |it: &scene::Item| self.spot.as_ref().map(|s| it.lit(s, &m.points)).unwrap_or(true);
+        let dim = |it: &scene::Item| if lit(it) { 1.0 } else { 0.35 };
+        // Petals: leader lines from the true position, and a small ivory dot there.
+        for it in &items {
+            if let Some((ax, ay)) = it.anchor {
+                let a = dim(it);
+                r.line_round(ax, ay, it.x, it.y, 2.6 * sc, (markers::HALO.0, markers::HALO.1, markers::HALO.2, 0.55 * a));
+                r.line_round(ax, ay, it.x, it.y, 1.2 * sc, (markers::IVORY.0, markers::IVORY.1, markers::IVORY.2, a));
             }
+        }
+        for it in &items {
+            if let Some((ax, ay)) = it.anchor {
+                r.fill_circle(ax, ay, 3.2 * sc, (markers::HALO.0, markers::HALO.1, markers::HALO.2, 0.6));
+                r.fill_circle(ax, ay, 2.0 * sc, (markers::IVORY.0, markers::IVORY.1, markers::IVORY.2, 1.0));
+            }
+        }
+        for (n, it) in items.iter().enumerate() {
+            if Some(n) == hovered {
+                continue;
+            }
+            let kk = k * if it.members.len() > 1 { 1.15 } else { 1.0 };
+            markers::draw(r, it.kind, it.color, &it.badge, it.x, it.y, kk, sc, dim(it));
+            if it.members.len() > 1 {
+                markers::count_pill(r, it.members.len(), it.color, it.x, it.y, sc, dim(it));
+            }
+        }
+        // Spotlight pulse: once, or twice for the quests of the "Available on this map" list.
+        if let Some(spot) = &self.spot {
+            let t = now.duration_since(self.spot_start).as_secs_f32() / 0.9;
+            let times = if matches!(spot, Spot::Quest(_)) { 2.0 } else { 1.0 };
+            if t < times {
+                for it in items.iter().filter(|it| lit(it)) {
+                    markers::pulse(r, it.x, it.y, it.radius(k), k, it.color, t.fract());
+                }
+            }
+        }
+
+        // 3. Labels: names of places (and of tracked spots when zoomed in), on dark plaques, never overlapping
+        //    the panel, another label, a token or the window edge; a label that does not fit is dropped.
+        let mut placed: Vec<(f32, f32, f32, f32)> = vec![];
+        let blockers: Vec<(f32, f32, f32)> = items.iter().filter(|it| markers::z(it.kind) >= 6).map(|it| (it.x, it.y, it.radius(k) + 3.0 * sc)).collect();
+        let mut seen_names: HashSet<String> = HashSet::new();
+        let mut cands: Vec<(u8, usize, String)> = vec![];
+        for (n, it) in items.iter().enumerate() {
+            let p = &m.points[it.members[0]];
+            if it.kind == markers::Kind::Place && !p.label.is_empty() {
+                cands.push((1, n, p.label.clone()));
+            } else if z >= 3.0 && matches!(it.kind, markers::Kind::Tracked | markers::Kind::TrackedOptional) && it.members.len() == 1 && p.chance.is_none() && p.container.is_none() {
+                let label = p.objective.and_then(|oi| m.legend.get(p.quest).and_then(|q| q.objectives.get(oi))).map(|o| o.label.clone()).unwrap_or_default();
+                if !label.is_empty() {
+                    cands.push((0, n, label));
+                }
+            }
+        }
+        cands.sort_by_key(|c| c.0);
+        let lh = 20.0 * sc;
+        for (_, n, label) in cands {
+            if !seen_names.insert(label.clone()) {
+                continue;
+            }
+            let it = &items[n];
+            let (tw, th) = r.measure(&label, Font::Section, 320.0 * sc);
+            let w = tw + 12.0 * sc;
+            let rad = it.radius(k);
+            let gap = rad + 6.0 * sc;
+            let slots = [
+                (it.x + gap, it.y - lh / 2.0),
+                (it.x - gap - w, it.y - lh / 2.0),
+                (it.x - w / 2.0, it.y - gap - lh),
+                (it.x - w / 2.0, it.y + gap),
+            ];
+            let free = |l: f32, t: f32| {
+                let (rr, b) = (l + w, t + lh);
+                if l < 4.0 || t < 4.0 || rr > gw as f32 - 4.0 || b > gh as f32 - 4.0 {
+                    return false;
+                }
+                if let Some((pl, pt, pr, pb)) = legend_rect {
+                    if rr > pl && l < pr && b > pt && t < pb {
+                        return false;
+                    }
+                }
+                if placed.iter().any(|&(ql, qt, qr, qb)| rr + 4.0 * sc > ql && l - 4.0 * sc < qr && b + 3.0 * sc > qt && t - 3.0 * sc < qb) {
+                    return false;
+                }
+                // Marker footprints (circle vs rectangle), the labelled marker itself excepted.
+                !blockers.iter().any(|&(bx, by, br)| {
+                    if (bx - it.x).abs() < 0.5 && (by - it.y).abs() < 0.5 {
+                        return false;
+                    }
+                    let (cx, cy) = (bx.clamp(l, rr), by.clamp(t, b));
+                    (cx - bx).powi(2) + (cy - by).powi(2) < br * br
+                })
+            };
+            if let Some(&(l, t)) = slots.iter().find(|&&(l, t)| free(l, t)) {
+                let a = dim(it);
+                r.fill_rrect(l, t, l + w, t + lh, 4.0 * sc, (0.082, 0.067, 0.047, 0.82 * a));
+                r.stroke_rrect(l + 0.5, t + 0.5, l + w - 0.5, t + lh - 0.5, 4.0 * sc, 1.0, (0.784, 0.655, 0.396, 0.30 * a));
+                r.text(&label, Font::Section, l + 6.0 * sc, t + (lh - th) / 2.0, tw + 2.0, (0.945, 0.918, 0.859, a));
+                placed.push((l, t, l + w, t + lh));
+            }
+        }
+
+        // 4. Hovered marker on top (×1.25 + focus ring), then its tooltip.
+        if let Some(n) = hovered {
+            let it = &items[n];
+            let kk = k * 1.25 * if it.members.len() > 1 { 1.15 } else { 1.0 };
+            markers::draw(r, it.kind, it.color, &it.badge, it.x, it.y, kk, sc, 1.0);
+            markers::focus_ring(r, it.x, it.y, markers::radius(it.kind) * kk, k);
+            if it.members.len() > 1 {
+                markers::count_pill(r, it.members.len(), it.color, it.x, it.y, sc, 1.0);
+            }
+            // Every marker under the cursor gets a section (at most 3).
+            let (cx, cy) = cursor();
+            let (lx, ly) = ((cx - gx) as f32, (cy - gy) as f32);
+            let near: Vec<usize> = {
+                let mut v: Vec<(f32, usize)> = items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, o)| {
+                        let lim = (o.radius(k) * 1.25).max(12.0 * sc) + 4.0 * sc;
+                        let d = (o.x - lx).powi(2) + (o.y - ly).powi(2);
+                        (i == n || d < lim * lim).then_some((if i == n { -1.0 } else { d }, i))
+                    })
+                    .collect();
+                v.sort_by(|a, b| a.0.total_cmp(&b.0));
+                v.into_iter().map(|x| x.1).collect()
+            };
+            let secs: Vec<TipSection> = near.iter().take(3).map(|&i| tip_for(self.s, m, &items[i])).collect();
+            let more = near.len().saturating_sub(3);
+            draw_tooltip(r, self.s, &secs, more, it.x, it.y, it.radius(k * 1.25), gw as f32, gh as f32, legend_rect, sc);
         }
         // Push the finished image to the transparent overlay window.
         self.renderer.present(self.overlay, gx, gy);
+        self.scene = items;
         self.legend_rect = legend_rect;
         self.show_panel(legend_rect.is_some());
     }
@@ -1596,8 +1821,13 @@ impl App {
     fn search_pick(&mut self, key: String) {
         // Quest: track / untrack (written to the website account; the website returns the new tracker).
         if let Some(qid) = key.strip_prefix("quest:") {
-            let tracked = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.tracked.iter().any(|q| q.quest_id == qid)).unwrap_or(false);
-            let _ = self.net.send(Req::Track { quest_id: qid.to_string(), tracked: !tracked });
+            let (tracked, title) = {
+                let sh = self.shared.lock().unwrap();
+                let tracked = sh.tracker.as_ref().map(|t| t.tracked.iter().any(|q| q.quest_id == qid)).unwrap_or(false);
+                let title = sh.pack.as_ref().and_then(|p| p.quests.get(qid)).map(|q| q.title.clone()).unwrap_or_default();
+                (tracked, title)
+            };
+            self.track_quest(qid.to_string(), title, !tracked);
             self.close_search();
             return;
         }
@@ -1643,10 +1873,7 @@ impl App {
         }
         self.shared.lock().unwrap().validate = None;
         let key = self.cfg.api_key().unwrap_or_default();
-        let auto_lang = {
-            let account = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.locale.clone());
-            format!("Auto ({})", i18n::effective("", account.as_deref()).to_uppercase())
-        };
+        let auto_lang = i18n::auto_label();
         self.settings = settings::Settings::open(
             self.s,
             settings::Init {
@@ -1773,7 +2000,7 @@ impl App {
         self.cfg.auto_update = v.auto_update;
         self.cfg.theme = v.theme.clone();
         self.cfg.panel_opacity = v.panel_opacity;
-        if v.autostart != self.cfg.autostart {
+        if v.autostart != config::autostart_enabled() {
             config::set_autostart(v.autostart);
         }
         self.cfg.autostart = v.autostart;
@@ -1804,36 +2031,311 @@ fn status_text(s: &i18n::Strings, st: Option<&Status>) -> &'static str {
     }
 }
 
-/// Draws a marker's tooltip (title + lines) next to (x, y), kept inside the window.
+/// One section of a marker tooltip (docs/DESIGN.md §6).
+struct TipSection {
+    /// Colour of the accent bar (owner or layer colour).
+    color: (f32, f32, f32),
+    /// Small caps line: "<badge> · <owner> · <kind>".
+    eyebrow: String,
+    /// What the marker is (container, node, place, quest…).
+    title: String,
+    /// (key, value) lines; an empty key = a plain line.
+    lines: Vec<(String, String)>,
+    /// Chance (0..1), drawn as a bar.
+    chance: Option<f64>,
+    /// Footer: (keycap, hint), e.g. ("Ctrl", "+ click to track this quest"); empty keycap = plain hint.
+    footer: Option<(String, String)>,
+}
+
+/// Formats a chance (0..1) as a percentage ("48 %", "2.5 %", "0.25 %").
+fn pct(c: f64) -> String {
+    let p = c * 100.0;
+    if p >= 10.0 {
+        format!("{p:.0} %")
+    } else if p >= 1.0 {
+        format!("{p:.1} %")
+    } else {
+        format!("{p:.2} %")
+    }
+}
+
+/// Container name of a point: its `container` field, else the "(…)" part of its label.
+fn container_of(p: &DrawPoint) -> Option<String> {
+    p.container
+        .clone()
+        .or_else(|| p.label.rfind('(').and_then(|i| p.label[i + 1..].strip_suffix(')')).map(|t| t.trim().to_string()))
+        .filter(|t| !t.is_empty())
+}
+
+/// Builds the tooltip section of one drawn marker.
+fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
+    let p = &m.points[it.members[0]];
+    let mut t = TipSection { color: it.color, eyebrow: String::new(), title: String::new(), lines: vec![], chance: None, footer: None };
+    let owner = match it.owner {
+        scene::Owner::Legend(q) => m.legend.get(q).map(|lq| format!("{} · {}", lq.badge, lq.title.to_uppercase()).trim_start_matches(" · ").to_string()),
+        scene::Owner::Layer(_) => None,
+    };
+    let layer = p.layer.and_then(|li| m.layers.get(li));
+    // Objective label(s) of a point: its own, then those merged into it (same spot).
+    let objectives = |p: &DrawPoint| -> Vec<String> {
+        let own = p.objective.and_then(|oi| m.legend.get(p.quest).and_then(|q| q.objectives.get(oi))).map(|o| o.label.clone()).unwrap_or_else(|| p.label.clone());
+        std::iter::once(own).chain(p.extra.iter().cloned()).filter(|l| !l.is_empty()).collect()
+    };
+    let harvest_lines = |t: &mut TipSection, p: &DrawPoint| {
+        if let Some(h) = &p.harvest {
+            if let Some(pr) = h.profession_label.as_ref().or(h.profession.as_ref()) {
+                t.lines.push((s.t_profession.into(), pr.clone()));
+            }
+            if let Some(lv) = h.level {
+                let you = h.player.map(|pl| format!("  ({} {pl})", s.tip_you)).unwrap_or_default();
+                t.lines.push((s.t_level.into(), format!("{lv}{you}")));
+            }
+        }
+    };
+
+    // Cluster: up to 4 members, best chance first.
+    if it.members.len() > 1 {
+        let n = it.members.len();
+        let what = layer.map(|l| l.title.to_uppercase()).or(owner.clone()).unwrap_or_default();
+        t.eyebrow = format!("{what} · {}", s.k_spots.replace("{n}", &n.to_string()));
+        t.title = match it.kind {
+            markers::Kind::QuestAvail => s.k_quest_avail.to_string(),
+            _ => layer.map(|l| l.title.clone()).or_else(|| m.legend.get(p.quest).map(|q| q.title.clone())).unwrap_or_default(),
+        };
+        let mut ms: Vec<&DrawPoint> = it.members.iter().map(|&i| &m.points[i]).collect();
+        ms.sort_by(|a, b| b.chance.unwrap_or(0.0).total_cmp(&a.chance.unwrap_or(0.0)));
+        let mut seen = HashSet::new();
+        let mut shown = 0;
+        for q in &ms {
+            let name = match (&q.quest_ref, &q.harvest) {
+                (Some((_, qt)), _) => qt.clone(),
+                (_, Some(h)) => h.node.clone().unwrap_or_else(|| q.label.clone()),
+                _ => container_of(q).unwrap_or_else(|| q.label.clone()),
+            };
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if shown < 4 {
+                t.lines.push((String::new(), match q.chance {
+                    Some(c) => format!("{name}  ·  {}", pct(c)),
+                    None => name,
+                }));
+            }
+            shown += 1;
+        }
+        if shown > 4 {
+            t.lines.push((String::new(), s.t_more.replace("{n}", &(shown - 4).to_string())));
+        }
+        t.footer = Some(match it.kind {
+            markers::Kind::QuestAvail => ("Ctrl".into(), format!("{} · {}", s.t_track_footer, ms.first().and_then(|q| q.quest_ref.as_ref()).map(|r| r.1.clone()).unwrap_or_default())),
+            _ => (String::new(), s.t_zoom.into()),
+        });
+        return t;
+    }
+
+    match (it.owner, it.kind) {
+        // Untracked quest (Quests layer).
+        (_, markers::Kind::QuestAvail) => {
+            t.eyebrow = s.k_quest_avail.into();
+            if let Some((qid, title)) = &p.quest_ref {
+                t.title = title.clone();
+                let objs = objectives(p);
+                for o in objs.iter().take(2) {
+                    t.lines.push((String::new(), o.clone()));
+                }
+                if objs.len() > 2 {
+                    t.lines.push((String::new(), s.t_more.replace("{n}", &(objs.len() - 2).to_string())));
+                }
+                if let Some(a) = m.available.iter().find(|a| a.quest_id == *qid) {
+                    if !a.giver.is_empty() {
+                        t.lines.push((s.t_giver.into(), a.giver.clone()));
+                    }
+                    t.lines.push((s.t_on_map.into(), a.spots.to_string()));
+                }
+            }
+            t.footer = Some(("Ctrl".into(), s.t_track_footer.into()));
+        }
+        // Tracked quest / recipe / search.
+        (scene::Owner::Legend(_), kind) => {
+            let owner = owner.unwrap_or_default();
+            let objs = objectives(p);
+            if kind == markers::Kind::Done {
+                t.eyebrow = format!("{owner} · {}", s.k_done);
+                t.title = objs.first().cloned().unwrap_or_default();
+            } else if let Some(h) = &p.harvest {
+                t.eyebrow = format!("{owner} · {}", s.k_harvest);
+                t.title = h.node.clone().unwrap_or_else(|| p.label.clone());
+                harvest_lines(&mut t, p);
+                t.chance = p.chance;
+            } else if p.placed {
+                t.eyebrow = format!("{owner} · {}", s.k_placed);
+                t.title = objs.first().cloned().unwrap_or_else(|| p.label.clone());
+                t.lines.push((String::new(), s.t_always.into()));
+                t.chance = p.chance.filter(|c| *c < 0.999);
+            } else if p.chance.is_some() || p.container.is_some() {
+                t.eyebrow = format!("{owner} · {}", s.k_container);
+                t.title = container_of(p).unwrap_or_else(|| p.label.clone());
+                for o in &objs {
+                    t.lines.push((String::new(), o.clone()));
+                }
+                t.chance = p.chance;
+            } else {
+                t.eyebrow = format!("{owner} · {}", s.k_objective);
+                t.title = objs.first().cloned().unwrap_or_default();
+                for o in objs.iter().skip(1) {
+                    t.lines.push((String::new(), o.clone()));
+                }
+                if !p.label.is_empty() && !objs.contains(&p.label) {
+                    t.lines.push((String::new(), p.label.clone()));
+                }
+            }
+        }
+        // Map layer.
+        (scene::Owner::Layer(_), _) => {
+            t.eyebrow = layer.map(|l| l.title.to_uppercase()).unwrap_or_default();
+            if let Some(h) = &p.harvest {
+                t.title = h.node.clone().unwrap_or_else(|| p.label.clone());
+                harvest_lines(&mut t, p);
+                t.chance = p.chance;
+            } else {
+                t.title = if p.label.is_empty() { layer.map(|l| l.title.clone()).unwrap_or_default() } else { p.label.clone() };
+                if layer.map(|l| l.id == "placed_loot").unwrap_or(false) {
+                    t.lines.push((String::new(), s.t_always.into()));
+                    t.chance = p.chance.filter(|c| *c < 0.999);
+                }
+            }
+        }
+    }
+    t
+}
+
+/// Draws a marker tooltip next to the marker at (x, y) of radius `mr`: dark box with a thin gold edge, a coloured
+/// accent bar per section, and stacked sections when several markers are under the cursor. It never covers the
+/// marker, avoids the panel and stays inside the window.
 #[allow(clippy::too_many_arguments)]
-fn draw_tooltip(r: &Renderer, title: &str, color: (f32, f32, f32), lines: &[String], x: f32, y: f32, gw: f32, gh: f32, sc: f32) {
-    let pad = 10.0 * sc;
-    let maxw = 380.0 * sc;
-    let (tw, th) = r.measure(title, Font::Bold, maxw);
-    let mut w = tw;
-    let mut h = th;
-    let mut hs = vec![];
-    for l in lines {
-        let (lw, lh) = r.measure(l, Font::Text, maxw);
-        w = w.max(lw);
-        h += lh + 2.0 * sc;
-        hs.push(lh);
+fn draw_tooltip(r: &Renderer, s: &i18n::Strings, secs: &[TipSection], more: usize, x: f32, y: f32, mr: f32, gw: f32, gh: f32, panel: Option<(f32, f32, f32, f32)>, sc: f32) {
+    if secs.is_empty() {
+        return;
     }
-    let (bw, bh) = (w + 2.0 * pad, h + 2.0 * pad);
-    let mut bx = x + 16.0 * sc;
-    let mut by = y - bh / 2.0;
-    if bx + bw > gw - 8.0 {
-        bx = x - 16.0 * sc - bw;
+    const T100: Rgba = (0.945, 0.918, 0.859, 1.0);
+    const T200: Rgba = (0.851, 0.820, 0.761, 1.0);
+    const T300: Rgba = (0.702, 0.663, 0.584, 1.0);
+    const GOLD_HI: Rgba = (0.922, 0.796, 0.545, 1.0);
+    let (padx, pady) = (16.0 * sc, 10.0 * sc);
+    let maxw = 320.0 * sc;
+    let cw = maxw - 2.0 * padx;
+    let gap = 3.0 * sc;
+    let line_h = r.measure("Ag", Font::Chip, 1000.0).1;
+    // Measure: width of the content (≤ maxw) and the height of each section.
+    let mut w: f32 = 0.0;
+    let mut heights = vec![];
+    for t in secs {
+        let mut h = 0.0;
+        let (ew, eh) = r.measure_spaced(&t.eyebrow, Font::Caps, cw, 1.1 * sc);
+        w = w.max(ew);
+        h += eh + gap;
+        let (tw, th) = r.measure(&t.title, Font::Bold, cw);
+        w = w.max(tw);
+        h += th + gap;
+        for (k, v) in &t.lines {
+            let lw = if k.is_empty() {
+                let (lw, lh) = r.measure(v, Font::Text, cw);
+                h += lh + gap;
+                lw
+            } else {
+                h += line_h + gap;
+                r.measure(k, Font::Chip, cw).0 + 8.0 * sc + r.measure(v, Font::Chip, cw).0
+            };
+            w = w.max(lw);
+        }
+        if t.chance.is_some() {
+            h += line_h + 2.0 * gap;
+            w = w.max(200.0 * sc);
+        }
+        if let Some((kc, hint)) = &t.footer {
+            h += 8.0 * sc + line_h + 4.0 * sc;
+            let kw = if kc.is_empty() { 0.0 } else { r.measure(kc, Font::Caps, 200.0).0 + 18.0 * sc };
+            w = w.max(kw + r.measure(hint, Font::Chip, cw).0);
+        }
+        heights.push(h);
     }
-    by = by.clamp(8.0, gh - bh - 8.0);
-    r.fill_rrect(bx, by, bx + bw, by + bh, 6.0 * sc, (0.06, 0.05, 0.04, 0.92));
-    r.stroke_rrect(bx, by, bx + bw, by + bh, 6.0 * sc, 1.5 * sc, (color.0, color.1, color.2, 0.9));
-    let mut cy = by + pad;
-    r.text(title, Font::Bold, bx + pad, cy, maxw, (color.0.max(0.6), color.1.max(0.6), color.2.max(0.6), 1.0));
-    cy += th + 2.0 * sc;
-    for (l, lh) in lines.iter().zip(hs) {
-        r.text(l, Font::Text, bx + pad, cy, maxw, (0.93, 0.91, 0.86, 1.0));
-        cy += lh + 2.0 * sc;
+    let more_t = (more > 0).then(|| s.t_more_here.replace("{n}", &more.to_string()));
+    let sep = 10.0 * sc;
+    let mut bh = heights.iter().sum::<f32>() + sep * (secs.len() - 1) as f32 + 2.0 * pady;
+    if more_t.is_some() {
+        bh += line_h + gap;
+    }
+    let bw = w.min(cw) + 2.0 * padx;
+    // Placement: to the right of the marker, its top 24 px above the marker centre; flipped to the left if it
+    // would cross the window edge or the panel.
+    let mut bx = x + mr + 14.0 * sc;
+    let hits_panel = |l: f32, t: f32| panel.map(|(pl, pt, pr, pb)| l + bw > pl && l < pr && t + bh > pt && t < pb).unwrap_or(false);
+    let by = (y - 24.0 * sc).clamp(8.0, (gh - bh - 8.0).max(8.0));
+    if bx + bw > gw - 8.0 || hits_panel(bx, by) {
+        bx = x - mr - 14.0 * sc - bw;
+    }
+    r.fill_rrect(bx + 2.0 * sc, by + 3.0 * sc, bx + bw + 2.0 * sc, by + bh + 3.0 * sc, 8.0 * sc, (0.0, 0.0, 0.0, 0.35));
+    r.fill_rrect(bx, by, bx + bw, by + bh, 8.0 * sc, (0.067, 0.055, 0.039, 0.95));
+    r.stroke_rrect(bx + 0.5, by + 0.5, bx + bw - 0.5, by + bh - 0.5, 8.0 * sc, 1.0, (0.784, 0.655, 0.396, 0.38));
+    let tx = bx + padx;
+    let mut cy = by + pady;
+    for (n, (t, h)) in secs.iter().zip(&heights).enumerate() {
+        if n > 0 {
+            r.line(tx, cy + sep / 2.0 - gap / 2.0, bx + bw - padx, cy + sep / 2.0 - gap / 2.0, 1.0, (0.784, 0.655, 0.396, 0.18));
+            cy += sep;
+        }
+        // Accent bar, inside the left edge, along this section.
+        r.fill_rrect(bx + 5.0 * sc, cy, bx + 8.0 * sc, cy + h - gap, 1.5 * sc, (t.color.0, t.color.1, t.color.2, 1.0));
+        let (_, eh) = r.measure_spaced(&t.eyebrow, Font::Caps, cw, 1.1 * sc);
+        r.text_spaced(&t.eyebrow, Font::Caps, tx, cy, cw, 1.1 * sc, T300);
+        cy += eh + gap;
+        cy += r.text(&t.title, Font::Bold, tx, cy, cw, T100) + gap;
+        for (k, v) in &t.lines {
+            if k.is_empty() {
+                cy += r.text(v, Font::Text, tx, cy, cw, T200) + gap;
+            } else {
+                let kw = r.measure(k, Font::Chip, cw).0;
+                r.text(k, Font::Chip, tx, cy, kw + 2.0, T300);
+                r.text(v, Font::Chip, tx + kw + 8.0 * sc, cy, cw - kw - 8.0 * sc, T100);
+                cy += line_h + gap;
+            }
+        }
+        // Chance bar: label, 7 px track filled in the owner colour, value right-aligned.
+        if let Some(c) = t.chance {
+            cy += gap;
+            let lw = r.measure(s.t_chance, Font::Chip, cw).0;
+            r.text(s.t_chance, Font::Chip, tx, cy, lw + 2.0, T300);
+            let val = pct(c);
+            let vw = r.measure(&val, Font::Chip, cw).0;
+            r.text(&val, Font::Chip, tx + (w.min(cw)) - vw, cy, vw + 2.0, T100);
+            let (b0, b1) = (tx + lw + 10.0 * sc, tx + w.min(cw) - vw - 10.0 * sc);
+            let bm = cy + line_h / 2.0;
+            if b1 > b0 {
+                r.fill_rrect(b0, bm - 3.5 * sc, b1, bm + 3.5 * sc, 3.5 * sc, (1.0, 1.0, 1.0, 0.10));
+                let f = b0 + (b1 - b0) * (c as f32).clamp(0.02, 1.0);
+                r.fill_rrect(b0, bm - 3.5 * sc, f, bm + 3.5 * sc, 3.5 * sc, (t.color.0, t.color.1, t.color.2, 1.0));
+            }
+            cy += line_h + gap;
+        }
+        // Footer: keycap + hint, under a hairline.
+        if let Some((kc, hint)) = &t.footer {
+            cy += 4.0 * sc;
+            r.line(tx, cy, bx + bw - padx, cy, 1.0, (0.784, 0.655, 0.396, 0.18));
+            cy += 4.0 * sc;
+            let mut hx = tx;
+            if !kc.is_empty() {
+                let kw = r.measure(kc, Font::Caps, 200.0).0 + 12.0 * sc;
+                r.fill_rrect(hx, cy + 1.0 * sc, hx + kw, cy + line_h - 1.0 * sc, 4.0 * sc, (0.188, 0.153, 0.114, 1.0));
+                r.stroke_rrect(hx + 0.5, cy + 1.5 * sc, hx + kw - 0.5, cy + line_h - 1.5 * sc, 4.0 * sc, 1.0, (0.522, 0.486, 0.427, 1.0));
+                r.text_center(kc, Font::Caps, hx + kw / 2.0, cy + line_h / 2.0, T100);
+                hx += kw + 6.0 * sc;
+            }
+            r.text(hint, Font::Chip, hx, cy, tx + cw - hx, if kc.is_empty() { T300 } else { GOLD_HI });
+            cy += line_h + gap;
+        }
+    }
+    if let Some(mt) = more_t {
+        r.text(&mt, Font::Chip, tx, cy, cw, T300);
     }
 }
 
@@ -1972,7 +2474,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let ev = (lp.0 & 0xffff) as u32;
             if ev == WM_RBUTTONUP || ev == WM_LBUTTONUP || ev == WM_CONTEXTMENU {
                 let upd = with_app(|a| a.shared.lock().unwrap().update.is_some()).unwrap_or(false);
-                let s = i18n::t();
+                let s = with_app(|a| a.s).unwrap_or_else(|| i18n::t_for(""));
                 tray::menu(hwnd, s, upd);
             } else if ev == WM_LBUTTONDBLCLK {
                 with_app(|a| a.open_settings());
@@ -2087,7 +2589,12 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             });
             LRESULT(0)
         }
-        WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MOUSEWHEEL => LRESULT(0),
+        WM_MOUSEWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xffff) as u16 as i16;
+            with_app(|a| a.panel_wheel(delta));
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN | WM_RBUTTONUP => LRESULT(0),
         WM_LBUTTONUP => {
             let (x, y) = pos();
             let moved = with_app(|a| a.panel_up()).unwrap_or(false);
@@ -2131,7 +2638,8 @@ pub fn release_single_instance() {
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let s = i18n::t();
+        // Texts in the language chosen in the settings (Auto = Windows').
+        let s = i18n::t_for(&Config::load().locale);
         let updated = std::env::args().any(|a| a == "--updated");
         // After an update, the old instance may take a moment to close: wait a little.
         let mut tries = if updated { 50 } else { 1 };
@@ -2228,12 +2736,21 @@ fn main() {
                 let _ = PostMessageW(HWND(main_id as _), WM_NET, WPARAM(0), LPARAM(0));
             }),
         );
-        let cfg = Config::load();
+        let mut cfg = Config::load();
+        // "Start with Windows": the Run registry entry is the reference. If it exists, it is rewritten to point to
+        // this exe (in case the exe was moved), so it never launches an old copy.
+        cfg.autostart = config::autostart_enabled();
+        if cfg.autostart {
+            config::set_autostart(true);
+        }
         let (rs_tx, rs_out) = resync::spawn_worker(Box::new(move || {
             let _ = PostMessageW(HWND(main_id as _), WM_NET, WPARAM(0), LPARAM(0));
         }));
-        let renderer = Renderer::new().expect("Direct2D");
-        let prenderer = Renderer::new().expect("Direct2D");
+        let mut renderer = Renderer::new().expect("Direct2D");
+        let mut prenderer = Renderer::new().expect("Direct2D");
+        // Overlay text sizes (px at 1440p): bold title, owner titles / tooltip title, body, small (DESIGN.md §3.3).
+        renderer.set_base_sizes([15.5, 15.5, 14.0, 12.5]);
+        prenderer.set_base_sizes([15.5, 15.5, 14.0, 12.5]);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         let app = App {
             main,
@@ -2276,6 +2793,17 @@ fn main() {
             search: None,
             items_requested: HashSet::new(),
             index_requested: false,
+            scene: vec![],
+            spot: None,
+            spot_pending: None,
+            spot_start: Instant::now(),
+            panel_scroll: 0.0,
+            toast: None,
+            last_track: None,
+            recent_track: None,
+            avail_open: false,
+            other_open: vec![],
+            lang_open: false,
             next_update_check: Instant::now() + Duration::from_secs(6 * 3600),
         };
         // Apply the settings, check for an update, show the tray icon; open the settings if no API key is set yet.
@@ -2286,7 +2814,7 @@ fn main() {
         APP.with(|a| *a.borrow_mut() = Some(app));
         tray::add(main, WM_TRAY, "Hunger Overlay");
         if updated {
-            let t = format!("{} {}.", i18n::t().updated_to, env!("CARGO_PKG_VERSION"));
+            let t = format!("{} {}.", s.updated_to, env!("CARGO_PKG_VERSION"));
             tray::balloon(main, "Hunger Overlay", &t);
         }
         if no_key {
@@ -2312,5 +2840,131 @@ fn main() {
             DispatchMessageW(&msg);
         }
         logf!("shutdown");
+    }
+}
+
+#[cfg(test)]
+mod preview {
+    //! Offline preview of the overlay, drawn by the real drawing code over a map that is not on screen:
+    //! `HUNGER_PREVIEW=<dir> cargo test --release preview -- --nocapture` writes, for two views of Map01 (default
+    //! and zoomed ×2.5), the overlay and panel images as raw premultiplied BGRA (`overlay_<view>.bgra`,
+    //! `panel_<view>.bgra`) plus `<view>.txt` (sizes and panel position), to be composited over screenshots.
+    //! Data: the app's cache (%APPDATA%\HungerOverlay). Skipped when HUNGER_PREVIEW is not set.
+    use super::*;
+
+    #[test]
+    fn preview() {
+        let Some(dir) = std::env::var_os("HUNGER_PREVIEW").map(std::path::PathBuf::from) else { return };
+        let d = config::data_dir();
+        let pack: model::Pack = serde_json::from_str(&std::fs::read_to_string(d.join("pack.json")).unwrap()).unwrap();
+        let tracker: model::Tracker = serde_json::from_str(&std::fs::read_to_string(d.join("tracker.json")).unwrap()).unwrap();
+        let items: Option<model::ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+        // (name, zoom level n, pan offset, layers on, quests-layer token to hover)
+        let views: [(&str, i32, (f64, f64), &[&str]); 2] = [
+            ("default", 0, (0.0, 0.0), &["extractions", "player_spawns", "quests"]),
+            ("zoomed", 3, (201.0, 199.5), &["extractions", "player_spawns", "quests", "places", "minibosses", "traps", "sound_traps", "placed_loot", "keys", "locks", "harvest"]),
+        ];
+        for (name, n, off, layers) in views {
+            let shared: SharedRef = Arc::new(Mutex::new(Default::default()));
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.pack = Some(pack.clone());
+                sh.tracker = Some(tracker.clone());
+                sh.items = items.clone();
+                sh.status = Some(Status::Ok);
+                sh.version = 1;
+            }
+            let (net, _rx) = std::sync::mpsc::channel();
+            let (rs_tx, _rs_rx) = std::sync::mpsc::channel();
+            let mut renderer = Renderer::new().unwrap();
+            let mut prenderer = Renderer::new().unwrap();
+            renderer.set_base_sizes([15.5, 15.5, 14.0, 12.5]);
+            prenderer.set_base_sizes([15.5, 15.5, 14.0, 12.5]);
+            let mut cfg = Config::default();
+            cfg.layers_on = layers.iter().map(|s| s.to_string()).collect();
+            cfg.layers_known = cfg.layers_on.clone();
+            cfg.quests_layer_seen = false;
+            let now = Instant::now();
+            // Map01 default square measured on the designer's screenshot (2560×1440).
+            let sq = Square { x0: 597.11, y0: 37.27, side: 4096.0 * 0.33342 };
+            let mut m = App::new_open(0, sq, now);
+            m.n = n;
+            m.zoom = 1.0 + 0.5 * n as f64;
+            m.off = off;
+            let mut app = App {
+                main: HWND::default(),
+                overlay: HWND::default(),
+                panel: HWND::default(),
+                prenderer,
+                panel_hits: vec![],
+                panel_hover: None,
+                panel_shown: false,
+                panel_grab: None,
+                cfg,
+                s: i18n::strings_for("en"),
+                shared,
+                net,
+                renderer,
+                fg_cache: (0, false),
+                client: (0, 0, 2560, 1440),
+                state: MapState::Open(Box::new(m)),
+                shown: true,
+                dirty: true,
+                keys_down: HashSet::new(),
+                hover: None,
+                settings: None,
+                capture_key: false,
+                taskbar_created: 0,
+                last_status: Some(Status::Ok),
+                update_hint_shown: true,
+                was_fg: true,
+                legend_rect: None,
+                candidate: None,
+                wheel_votes: (0, 0),
+                remember: None,
+                next_global: now,
+                rs_tx,
+                rs_out: Default::default(),
+                rs_job: None,
+                rs_next_id: 1,
+                install_requested: false,
+                next_update_check: now,
+                balloon_url: None,
+                search: None,
+                items_requested: HashSet::new(),
+                index_requested: true,
+                scene: vec![],
+                spot: None,
+                spot_pending: None,
+                spot_start: now,
+                panel_scroll: 0.0,
+                toast: None,
+                last_track: None,
+                recent_track: None,
+                avail_open: false,
+                other_open: vec![],
+                lang_open: false,
+            };
+            app.sync_data();
+            app.draw();
+            // Hover a Quests-layer token (default view) or a tracked container (zoomed view), and show a toast.
+            let target = app.scene.iter().find(|it| if name == "default" { it.kind == markers::Kind::QuestAvail && it.members.len() == 1 } else { markers::is_owner(it.kind) && it.members.len() == 1 });
+            app.hover = target.map(|it| it.members[0]);
+            // Default view: language list open.
+            app.lang_open = name == "default";
+            if name == "zoomed" {
+                app.toast = Some((panel::Toast { text: format!("{} Mapping the Front", app.s.toast_tracking), ok: true, undo: true }, now));
+            }
+            app.draw();
+            let (l, t, r, b) = app.legend_rect.unwrap();
+            std::fs::write(dir.join(format!("overlay_{name}.bgra")), app.renderer.bgra()).unwrap();
+            std::fs::write(dir.join(format!("panel_{name}.bgra")), app.prenderer.bgra()).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.txt")),
+                format!("{} {} {} {} {} {} {}", app.renderer.w, app.renderer.h, l, t, app.prenderer.w, app.prenderer.h, (r - l) as i32 * 0 + (b - t) as i32),
+            )
+            .unwrap();
+            println!("{name}: {} markers drawn, panel {}×{} at ({l}, {t})", app.scene.len(), app.prenderer.w, app.prenderer.h);
+        }
     }
 }

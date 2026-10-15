@@ -84,6 +84,100 @@ pub struct Strings {
     pub update_available: &'static str,
     pub auto_update: &'static str,
     pub updated_to: &'static str,
+    /// Search field placeholder.
+    pub p_find: &'static str,
+    /// Markers of an owner on this map ("{n}").
+    pub p_spots: &'static str,
+    /// Start of the one-line list of tracked quests with nothing on this map.
+    pub p_other_map: &'static str,
+    /// Sub-header of the untracked quests of the Quests layer.
+    pub p_avail: &'static str,
+    /// Right-aligned hint of that sub-header.
+    pub p_avail_hint: &'static str,
+    /// Button that starts tracking a quest.
+    pub p_track: &'static str,
+    /// Expands a list ("{n}").
+    pub p_more: &'static str,
+    /// Collapses a list.
+    pub p_less: &'static str,
+    /// Every marker of an owner is below the chance filter ("{n}" %).
+    pub p_filter_warn: &'static str,
+    /// Lowers the chance filter ("{n}" %).
+    pub p_reveal: &'static str,
+    /// Removes every item search.
+    pub p_clear_all: &'static str,
+    /// Number of layers switched on ("{n}").
+    pub p_layers_on: &'static str,
+    /// Layer group.
+    pub g_survival: &'static str,
+    /// Layer group.
+    pub g_loot: &'static str,
+    /// Layer group.
+    pub g_world: &'static str,
+    /// Tag of something new.
+    pub p_new: &'static str,
+    /// Toast after tracking a quest (followed by its title).
+    pub toast_tracking: &'static str,
+    /// Toast link that reverts the last tracking.
+    pub toast_undo: &'static str,
+    /// Toast after Undo (followed by the quest title).
+    pub toast_undone: &'static str,
+    /// Nothing tracked.
+    pub p_empty: &'static str,
+    /// Explanation under it.
+    pub p_empty_hint: &'static str,
+    /// Button that turns the Quests layer on.
+    pub p_empty_btn: &'static str,
+    /// The map position is being recomputed.
+    pub p_relocating: &'static str,
+    /// Collapsed panel summary ("{q}" quests, "{l}" layers).
+    pub p_summary: &'static str,
+    /// Hint that the panel can be scrolled.
+    pub p_scroll: &'static str,
+    /// Panel section.
+    pub p_sec_quests: &'static str,
+    /// Panel section.
+    pub p_sec_crafting: &'static str,
+    /// Panel section.
+    pub p_sec_search: &'static str,
+    /// Panel section.
+    pub p_sec_layers: &'static str,
+    /// Tooltip eyebrow: a container.
+    pub k_container: &'static str,
+    /// Tooltip eyebrow: an objective spot.
+    pub k_objective: &'static str,
+    /// Tooltip eyebrow: a harvest node.
+    pub k_harvest: &'static str,
+    /// Tooltip eyebrow: a placed object.
+    pub k_placed: &'static str,
+    /// Tooltip eyebrow: a done objective.
+    pub k_done: &'static str,
+    /// Tooltip eyebrow: an untracked quest.
+    pub k_quest_avail: &'static str,
+    /// Tooltip eyebrow of a cluster ("{n}").
+    pub k_spots: &'static str,
+    /// Tooltip footer of a cluster.
+    pub t_zoom: &'static str,
+    /// More entries than listed ("{n}").
+    pub t_more: &'static str,
+    /// More markers under the cursor ("{n}").
+    pub t_more_here: &'static str,
+    /// Tooltip key.
+    pub t_giver: &'static str,
+    /// Tooltip key.
+    pub t_profession: &'static str,
+    /// Tooltip key.
+    pub t_level: &'static str,
+    /// Placed object.
+    pub t_always: &'static str,
+    /// Tooltip key: objectives of a quest on this map.
+    pub t_on_map: &'static str,
+    /// Chance bar label.
+    pub t_chance: &'static str,
+    /// Tooltip key.
+    pub t_objective: &'static str,
+    /// After the "Ctrl" keycap.
+    pub t_track_footer: &'static str,
 }
 
 /// French UI texts.
@@ -124,8 +218,8 @@ pub static FR: Strings = Strings {
     min_chance: "Points de ramassage : chance minimum",
     panel_done: "Terminés",
     panel_layers: "CALQUES",
-    harvest_layer: "Récolte (selon vos niveaux)",
-    quests_layer: "Quêtes (non suivies)",
+    harvest_layer: "Récolte · vos niveaux",
+    quests_layer: "Quêtes",
     tip_track_hint: "Ctrl + clic : suivre cette quête",
     panel_opacity: "Opacité du panneau",
     panel_search: "🔍 Chercher un objet…",
@@ -167,6 +261,53 @@ pub static FR: Strings = Strings {
     update_available: "Une nouvelle version de Hunger Overlay est disponible.",
     auto_update: "Mises à jour automatiques",
     updated_to: "Hunger Overlay a été mis à jour en version",
+    p_find: "Chercher un objet ou une quête…",
+    p_spots: "{n} points",
+    p_other_map: "Autre carte :",
+    p_avail: "DISPONIBLES SUR CETTE CARTE",
+    p_avail_hint: "calque Quêtes",
+    p_track: "+ Suivre",
+    p_more: "Afficher {n} de plus",
+    p_less: "Réduire",
+    p_filter_warn: "Seulement sous votre filtre de {n} % ici",
+    p_reveal: "Afficher ≥ {n} %",
+    p_clear_all: "Tout effacer",
+    p_layers_on: "{n} actifs",
+    g_survival: "SURVIE",
+    g_loot: "BUTIN & ACCÈS",
+    g_world: "MONDE",
+    p_new: "NOUVEAU",
+    toast_tracking: "Quête suivie :",
+    toast_undo: "Annuler",
+    toast_undone: "Suivi annulé :",
+    p_empty: "Aucune quête suivie pour l'instant.",
+    p_empty_hint: "Suivez des quêtes sur hunger-companion.com, ou activez le calque Quêtes pour les découvrir sur cette carte.",
+    p_empty_btn: "Afficher les quêtes de cette carte",
+    p_relocating: "Recalage de la carte… repères masqués",
+    p_summary: "{q} quêtes · {l} calques",
+    p_scroll: "Suite plus bas · molette",
+    p_sec_quests: "QUÊTES",
+    p_sec_crafting: "ARTISANAT",
+    p_sec_search: "RECHERCHE",
+    p_sec_layers: "CALQUES DE LA CARTE",
+    k_container: "CONTENEUR",
+    k_objective: "OBJECTIF",
+    k_harvest: "RÉCOLTE",
+    k_placed: "POSÉ",
+    k_done: "FAIT",
+    k_quest_avail: "QUÊTE · NON SUIVIE",
+    k_spots: "{n} POINTS",
+    t_zoom: "Zoomez pour les séparer",
+    t_more: "+{n} autres",
+    t_more_here: "+{n} autres ici",
+    t_giver: "Donneur",
+    t_profession: "Métier",
+    t_level: "Niveau",
+    t_always: "Toujours à cet endroit",
+    t_on_map: "Sur cette carte",
+    t_chance: "Chance",
+    t_objective: "Objectif",
+    t_track_footer: "+ clic : suivre cette quête",
 };
 
 /// English UI texts (used for every language other than French).
@@ -207,8 +348,8 @@ pub static EN: Strings = Strings {
     min_chance: "Loot points: minimum chance",
     panel_done: "Completed",
     panel_layers: "LAYERS",
-    harvest_layer: "Harvest (your levels)",
-    quests_layer: "Quests (not tracked)",
+    harvest_layer: "Harvest · your levels",
+    quests_layer: "Quests",
     tip_track_hint: "Ctrl + click: track this quest",
     panel_opacity: "Panel opacity",
     panel_search: "🔍 Find an item…",
@@ -250,6 +391,53 @@ pub static EN: Strings = Strings {
     update_available: "A new version of Hunger Overlay is available.",
     auto_update: "Automatic updates",
     updated_to: "Hunger Overlay has been updated to version",
+    p_find: "Find an item or quest…",
+    p_spots: "{n} spots",
+    p_other_map: "Other map:",
+    p_avail: "AVAILABLE ON THIS MAP",
+    p_avail_hint: "Quests layer",
+    p_track: "+ Track",
+    p_more: "Show {n} more",
+    p_less: "Show less",
+    p_filter_warn: "Only below your {n} % filter here",
+    p_reveal: "Show ≥ {n} %",
+    p_clear_all: "Clear all",
+    p_layers_on: "{n} on",
+    g_survival: "SURVIVAL",
+    g_loot: "LOOT & ACCESS",
+    g_world: "WORLD",
+    p_new: "NEW",
+    toast_tracking: "Now tracking",
+    toast_undo: "Undo",
+    toast_undone: "No longer tracking",
+    p_empty: "No quest tracked yet.",
+    p_empty_hint: "Track quests on hunger-companion.com, or turn on the Quests layer to discover them on this map.",
+    p_empty_btn: "Show quests on this map",
+    p_relocating: "Re-locating the map… markers hidden",
+    p_summary: "{q} quests · {l} layers",
+    p_scroll: "More below · scroll",
+    p_sec_quests: "QUESTS",
+    p_sec_crafting: "CRAFTING",
+    p_sec_search: "SEARCH",
+    p_sec_layers: "MAP LAYERS",
+    k_container: "CONTAINER",
+    k_objective: "OBJECTIVE",
+    k_harvest: "HARVEST",
+    k_placed: "PLACED",
+    k_done: "DONE",
+    k_quest_avail: "QUEST · NOT TRACKED",
+    k_spots: "{n} SPOTS",
+    t_zoom: "Zoom in to separate",
+    t_more: "+{n} more",
+    t_more_here: "+{n} more here",
+    t_giver: "Giver",
+    t_profession: "Profession",
+    t_level: "Level",
+    t_always: "Always at this spot",
+    t_on_map: "On this map",
+    t_chance: "Chance",
+    t_objective: "Objective",
+    t_track_footer: "+ click to track this quest",
 };
 
 /// Languages offered by the site (code, display name).
@@ -275,26 +463,36 @@ pub fn strings_for(lang: &str) -> &'static Strings {
     }
 }
 
-/// Effective language: the forced one, otherwise the site account's (if the site supports it), otherwise
-/// Windows' (English by default).
-pub fn effective(forced: &str, account: Option<&str>) -> String {
+/// Effective language: the one chosen in the settings, otherwise ("Auto") the Windows display language when the
+/// app offers it, otherwise English. The website account's language is not used.
+pub fn effective(forced: &str) -> String {
     if !forced.is_empty() {
         return forced.to_lowercase();
     }
-    if let Some(a) = account {
-        let a = a.to_lowercase();
-        // Keep only the primary language subtag ("pt-BR" / "pt_br" → "pt").
-        let a = a.split(['-', '_']).next().unwrap_or("").to_string();
-        if LANGS.iter().any(|(c, _)| *c == a) {
-            return a;
-        }
+    let w = pack_locale("");
+    if LANGS.iter().any(|(c, _)| *c == w) {
+        w
+    } else {
+        "en".into()
     }
-    pack_locale("")
 }
 
-/// UI texts for the Windows language (ignores the forced setting and the site account).
-pub fn t() -> &'static Strings {
-    strings_for(&pack_locale(""))
+/// Label of the "Auto" choice, with the language it currently resolves to, e.g. "Auto (FR)".
+pub fn auto_label() -> String {
+    format!("Auto ({})", effective("").to_uppercase())
+}
+
+/// Display name of a language code ("" = the "Auto" label).
+pub fn lang_name(code: &str) -> String {
+    if code.is_empty() {
+        return auto_label();
+    }
+    LANGS.iter().find(|l| l.0 == code).map(|l| l.1.to_string()).unwrap_or_else(|| code.to_uppercase())
+}
+
+/// UI texts for a language setting ("" = Auto).
+pub fn t_for(forced: &str) -> &'static Strings {
+    strings_for(&effective(forced))
 }
 
 /// Pack locale: the forced setting, otherwise the Windows UI language (2-letter ISO code).

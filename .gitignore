@@ -1,3 +1,7 @@
 /target
 *.log
 assets/icon_source.png
+
+# Designer mockup sources (large game screenshots and full-size renders)
+docs/design/base_*.png
+docs/design/*.png

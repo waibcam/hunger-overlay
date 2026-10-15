@@ -210,10 +210,9 @@ impl Worker {
         s.version += 1;
     }
 
-    /// Language wanted now: forced, otherwise the site account's (last tracker), otherwise Windows'.
+    /// Language wanted now: the one chosen in the settings, otherwise Windows' (English if not offered).
     fn wanted_locale(&self) -> String {
-        let s = self.shared.lock().unwrap();
-        crate::i18n::effective(&self.forced, s.tracker.as_ref().and_then(|t| t.locale.as_deref()))
+        crate::i18n::effective(&self.forced)
     }
 
     /// Persists the cache validators to etags.json.
@@ -699,6 +698,29 @@ pub fn key_format_ok(k: &str) -> bool {
 
 /// True if dotted version `a` is newer than `b` (numeric comparison, part by part: "1.10.0" > "1.9.3").
 fn version_gt(a: &str, b: &str) -> bool {
-    let p = |s: &str| s.split('.').map(|x| x.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    // Numeric parts only ("0.2.0-beta" → [0, 2, 0]); missing parts count as 0 ("0.2" = "0.2.0").
+    let p = |s: &str| {
+        let mut v: Vec<u32> = s.trim().trim_start_matches('v').split('.').map(|x| x.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)).collect();
+        while v.len() < 3 {
+            v.push(0);
+        }
+        v
+    };
     p(a) > p(b)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A newer local build (e.g. a test version installed by hand) is never "updated" back to the published one.
+    #[test]
+    fn version_order() {
+        use super::version_gt;
+        assert!(version_gt("0.1.1", "0.1.0"));
+        assert!(version_gt("0.1.10", "0.1.9"));
+        assert!(version_gt("v0.2", "0.1.9"));
+        assert!(!version_gt("0.1.0", "0.1.0"));
+        assert!(!version_gt("0.1.0", "0.2.0"));
+        assert!(!version_gt("0.2", "0.2.0"));
+        assert!(!version_gt("", "0.1.0"));
+    }
 }

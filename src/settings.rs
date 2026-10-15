@@ -108,10 +108,10 @@ enum W {
     Opacity,
     /// "Show done objectives" switch.
     ShowDone,
-    /// Previous language.
-    LangPrev,
-    /// Next language.
-    LangNext,
+    /// Language field: opens / closes the list.
+    LangOpen,
+    /// Entry of the language list (0 = Auto, then `LANGS` in order).
+    LangItem(u8),
     /// Theme segment: 0 = auto, 1 = light, 2 = dark.
     Theme(u8),
     /// "Visible in captures" switch.
@@ -266,6 +266,8 @@ pub struct Settings {
     edit_rect: (f32, f32, f32, f32),
     /// Total client height computed by the layout.
     height: f32,
+    /// The language list is open.
+    lang_open: bool,
 }
 
 /// Converts a Rust string into a NUL-terminated UTF-16 string for Win32.
@@ -444,6 +446,7 @@ impl Settings {
                 slider2: (0.0, 1.0),
                 edit_rect: (0.0, 0.0, 0.0, 0.0),
                 height: 600.0,
+                lang_open: false,
             };
             st.retheme();
             // Measuring pass (no drawing) to get the total height.
@@ -697,16 +700,23 @@ impl Settings {
         } else {
             crate::i18n::LANGS.iter().find(|l| l.0 == self.v.locale).map(|l| l.1.to_string()).unwrap_or(self.v.locale.clone())
         };
-        let lw = 150.0 * k;
-        let total = 32.0 * k * 2.0 + lw + 16.0 * k;
+        // Drop-down field: current language and a chevron; the list itself is drawn last, over the window.
+        let total = 230.0 * k;
         row_label(y + 6.0 * k, s.language.trim_end_matches([' ', ':']), None, total);
         let lx = inner_r - total;
-        btn(&mut hits, lx, y, "‹", W::LangPrev, false);
         if draw {
-            let tw = r.measure(&lang_txt, Font::Text, lw).0;
-            r.text(&lang_txt, Font::Text, lx + 40.0 * k + (lw - tw) / 2.0, y + 7.0 * k, tw + 2.0, t.text);
+            let hv = hover == Some(W::LangOpen) || self.lang_open;
+            r.fill_rrect(lx, y, inner_r, y + 32.0 * k, 4.0 * k, if hv { t.hover } else { t.ctrl });
+            r.stroke_rrect(lx + 0.5, y + 0.5, inner_r - 0.5, y + 32.0 * k - 0.5, 4.0 * k, 1.0, if self.lang_open { t.accent } else { t.border });
+            r.text(&lang_txt, Font::Text, lx + 12.0 * k, y + 7.0 * k, total - 44.0 * k, t.text);
+            // Chevron (down when closed, up when open).
+            let (cx, cy, d) = (inner_r - 18.0 * k, y + 16.0 * k, 4.0 * k);
+            let dy = if self.lang_open { -d / 2.0 } else { d / 2.0 };
+            r.line_round(cx - d, cy - dy, cx, cy + dy, 1.6 * k, t.sub);
+            r.line_round(cx, cy + dy, cx + d, cy - dy, 1.6 * k, t.sub);
         }
-        btn(&mut hits, inner_r - 32.0 * k, y, "›", W::LangNext, false);
+        hits.push(Hit { r: (lx, y, inner_r, y + 32.0 * k), w: W::LangOpen });
+        let lang_field = (lx, y + 32.0 * k, inner_r);
         y += 32.0 * k + row_gap;
         // Theme: segmented control Auto / Light / Dark.
         let opts = [(s.theme_auto, "auto"), (s.theme_light, "light"), (s.theme_dark, "dark")];
@@ -784,13 +794,50 @@ impl Settings {
         bx -= cancel_w + 8.0 * k;
         btn(&mut hits, bx, y, s.cancel, W::Cancel, false);
         y += 32.0 * k + 16.0 * k;
+        // Language list, over everything else (opens downwards, or upwards if it would not fit).
+        if self.lang_open {
+            let entries: Vec<String> = std::iter::once(self.auto_lang.clone()).chain(crate::i18n::LANGS.iter().map(|l| l.1.to_string())).collect();
+            let ih = 30.0 * k;
+            let lh = ih * entries.len() as f32 + 8.0 * k;
+            let (lx, below, rx) = lang_field;
+            let mut ly = below + 4.0 * k;
+            if ly + lh > y {
+                ly = below - 32.0 * k - 4.0 * k - lh;
+            }
+            if draw {
+                r.fill_rrect(lx + 2.0 * k, ly + 3.0 * k, rx + 2.0 * k, ly + lh + 3.0 * k, 6.0 * k, (0.0, 0.0, 0.0, 0.25));
+                r.fill_rrect(lx, ly, rx, ly + lh, 6.0 * k, t.card);
+                r.stroke_rrect(lx + 0.5, ly + 0.5, rx - 0.5, ly + lh - 0.5, 6.0 * k, 1.0, t.border);
+            }
+            let codes: Vec<&str> = std::iter::once("").chain(crate::i18n::LANGS.iter().map(|l| l.0)).collect();
+            let mut iy = ly + 4.0 * k;
+            for (i, name) in entries.iter().enumerate() {
+                let id = W::LangItem(i as u8);
+                let sel = codes[i] == self.v.locale;
+                if draw {
+                    if hover == Some(id) || sel {
+                        r.fill_rrect(lx + 4.0 * k, iy, rx - 4.0 * k, iy + ih, 4.0 * k, if hover == Some(id) { t.hover } else { t.ctrl });
+                    }
+                    if sel {
+                        r.fill_rrect(lx + 6.0 * k, iy + 7.0 * k, lx + 9.0 * k, iy + ih - 7.0 * k, 1.5 * k, t.accent);
+                    }
+                    r.text(name, Font::Text, lx + 16.0 * k, iy + 6.0 * k, rx - lx - 24.0 * k, t.text);
+                }
+                hits.push(Hit { r: (lx + 4.0 * k, iy, rx - 4.0 * k, iy + ih), w: id });
+                iy += ih;
+            }
+        }
         self.height = y;
         self.hits = hits;
     }
 
-    /// Widget at (x, y), if any.
+    /// Widget at (x, y), if any. While the language list is open, only the list and its field respond.
     fn hit(&self, x: f32, y: f32) -> Option<W> {
-        self.hits.iter().find(|h| x >= h.r.0 && x <= h.r.2 && y >= h.r.1 && y <= h.r.3).map(|h| h.w)
+        self.hits
+            .iter()
+            .filter(|h| !self.lang_open || matches!(h.w, W::LangOpen | W::LangItem(_)))
+            .find(|h| x >= h.r.0 && x <= h.r.2 && y >= h.r.1 && y <= h.r.3)
+            .map(|h| h.w)
     }
 
     /// Mouse moved to (x, y) (negative = left the window): drags the active slider, or updates hover.
@@ -841,7 +888,14 @@ impl Settings {
             }
             return None;
         }
-        let w = self.hit(x, y)?;
+        let Some(w) = self.hit(x, y) else {
+            // A click outside the open language list closes it.
+            if self.lang_open {
+                self.lang_open = false;
+                self.redraw();
+            }
+            return None;
+        };
         let mut out = None;
         match w {
             // Start dragging a slider (mouse captured until release) and jump to the click position.
@@ -863,13 +917,11 @@ impl Settings {
             W::Capture => self.v.capture_visible = !self.v.capture_visible,
             W::Autostart => self.v.autostart = !self.v.autostart,
             W::AutoUpdate => self.v.auto_update = !self.v.auto_update,
-            // Cycle through "" (automatic) followed by every supported language, wrapping around.
-            W::LangPrev | W::LangNext => {
-                let order: Vec<&str> = std::iter::once("").chain(crate::i18n::LANGS.iter().map(|l| l.0)).collect();
-                let i = order.iter().position(|c| *c == self.v.locale).unwrap_or(0) as i32;
-                let d = if w == W::LangNext { 1 } else { -1 };
-                let j = (i + d).rem_euclid(order.len() as i32) as usize;
-                self.v.locale = order[j].to_string();
+            W::LangOpen => self.lang_open = !self.lang_open,
+            // Entry 0 = Auto (""), then the languages in `LANGS` order.
+            W::LangItem(i) => {
+                self.v.locale = if i == 0 { String::new() } else { crate::i18n::LANGS[i as usize - 1].0.to_string() };
+                self.lang_open = false;
             }
             W::Theme(i) => {
                 self.v.theme = ["auto", "light", "dark"][i as usize].to_string();

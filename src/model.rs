@@ -68,18 +68,24 @@ pub struct Marker {
     /// Chance (0..1) that the container holds the item, if the website provides it.
     #[serde(default)]
     pub chance: Option<f64>,
-    /// Container type (English name), if the website provides it.
+    /// Container type (English name, used as a key), if the website provides it.
     #[serde(default)]
     pub container: Option<String>,
+    /// Container name in the pack's language, if the website provides it (shown instead of `container`).
+    #[serde(default)]
+    pub container_label: Option<String>,
     /// "objective" | "container" | "harvest".
     #[serde(default)]
     pub source: Option<String>,
     /// Harvest node name.
     #[serde(default)]
     pub node: Option<String>,
-    /// Gathering profession needed for a harvest node.
+    /// Gathering profession needed for a harvest node (English name, used as a key).
     #[serde(default)]
     pub profession: Option<String>,
+    /// Profession name in the pack's language, if the website provides it (shown instead of `profession`).
+    #[serde(default)]
+    pub profession_label: Option<String>,
     /// Profession level needed for a harvest node.
     #[serde(default)]
     pub required_level: Option<u32>,
@@ -421,6 +427,8 @@ pub struct DrawPoint {
     pub placed: bool,
     /// Quest-layer point: the (untracked) quest it belongs to, so the player can start tracking it (Ctrl+click).
     pub quest_ref: Option<(String, String)>,
+    /// Labels of the other objectives of the same owner at exactly this spot (duplicates are merged into one point).
+    pub extra: Vec<String>,
 }
 
 /// Harvest details of a point.
@@ -428,8 +436,10 @@ pub struct DrawPoint {
 pub struct Harvest {
     /// Node name.
     pub node: Option<String>,
-    /// Gathering profession.
+    /// Gathering profession (English name: key for colours and the player's levels).
     pub profession: Option<String>,
+    /// Profession name to display (translated when the website provides it).
+    pub profession_label: Option<String>,
     /// Required profession level.
     pub level: Option<u32>,
     /// Player's level in that profession, as declared on the website.
@@ -453,6 +463,17 @@ pub struct LegendLayer {
     pub here: usize,
 }
 
+/// What a legend row stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerKind {
+    /// A quest tracked on the website.
+    Quest,
+    /// A recipe of the website's crafting list.
+    Craft,
+    /// An item searched in the app.
+    Search,
+}
+
 /// One row of the legend (a tracked quest and its objectives).
 #[derive(Debug, Clone)]
 pub struct LegendQuest {
@@ -470,6 +491,26 @@ pub struct LegendQuest {
     pub filtered: usize,
     /// Hidden locally (click in the panel): shown greyed out, without points.
     pub hidden: bool,
+    /// Badge drawn in the panel and inside the markers: "1"…"9" for quests, "A"…"Z" for recipes and searches
+    /// (so owners can be told apart without relying on colour); empty past 9 quests / 26 letters.
+    pub badge: String,
+    /// Quest, recipe or search.
+    pub kind: OwnerKind,
+    /// Highest chance (0..1) among the markers on this map hidden by the chance filter (0 = none hidden).
+    pub best_filtered: f64,
+}
+
+/// An untracked quest with objective locations on the current map (Quests layer, "Available on this map").
+#[derive(Debug, Clone)]
+pub struct AvailQuest {
+    /// Quest id.
+    pub quest_id: String,
+    /// Translated title.
+    pub title: String,
+    /// Quest giver (NPC name), if known.
+    pub giver: String,
+    /// Number of objective spots on this map.
+    pub spots: usize,
 }
 
 /// One objective row of the legend.
@@ -505,6 +546,8 @@ pub struct ViewOpts<'a> {
     pub harvest_title: &'a str,
     /// Translated title of the "Quests" layer (objective locations of every quest the player does not track).
     pub quests_title: &'a str,
+    /// Badge slots of the tracked quests (`Config::quest_slots`): order and numbers of the quest rows.
+    pub slots: &'a [String],
 }
 
 /// Colours of searched items (distinct from the website's quest palette).
@@ -518,11 +561,13 @@ pub struct ViewOut {
     pub legend: Vec<LegendQuest>,
     /// Layer rows.
     pub layers: Vec<LegendLayer>,
+    /// Untracked quests with objectives on this map (sorted by giver, then title).
+    pub available: Vec<AvailQuest>,
 }
 
 /// Builds the points and the legend of a map: tracked quests, crafting list, searched items, enabled layers.
 pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
-    let mut out = ViewOut { points: vec![], legend: vec![], layers: vec![] };
+    let mut out = ViewOut { points: vec![], legend: vec![], layers: vec![], available: vec![] };
     let map_id = o.map_id;
     let Some(pm) = pack.maps.iter().find(|m| m.map_id == map_id) else {
         return out;
@@ -538,6 +583,8 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
     };
     // On this map and not below the minimum chance (points without a known chance are always kept).
     let keep = |m: &Marker| m.map == map_id && m.chance().map(|c| c + 1e-9 >= o.min_chance).unwrap_or(true);
+    // Highest chance among the markers of this map that the filter hides (to offer "Show ≥ N %").
+    let best_hidden = |ms: &[Marker]| ms.iter().filter(|m| m.map == map_id && !keep(m)).filter_map(|m| m.chance()).fold(0.0f64, f64::max);
     // Point of an objective (or an ingredient), with the harvest info and the player's level.
     #[allow(clippy::too_many_arguments)]
     let point = |mk: &Marker, u: f64, v: f64, color: (f32, f32, f32), quest: usize, objective: Option<usize>, done: bool, optional: bool, fallback: &str| -> DrawPoint {
@@ -555,18 +602,22 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             place: false,
             label: mk.label.clone().unwrap_or_else(|| fallback.to_string()),
             chance: mk.chance(),
-            container: mk.container.clone(),
-            harvest: harvest.then(|| Harvest { node: mk.node.clone(), profession: mk.profession.clone(), level: mk.required_level, player }),
+            container: mk.container_label.clone().or_else(|| mk.container.clone()),
+            harvest: harvest.then(|| Harvest { node: mk.node.clone(), profession: mk.profession.clone(), profession_label: mk.profession_label.clone(), level: mk.required_level, player }),
             locked,
             layer: None,
             diamond: false,
             placed: mk.source.as_deref() == Some("placed"),
             quest_ref: None,
+            extra: vec![],
         }
     };
 
-    // 1. Tracked quests (completed ones and quests missing from the pack are skipped).
-    for tq in &tracker.tracked {
+    // 1. Tracked quests (completed ones and quests missing from the pack are skipped), in badge order.
+    let slot = |id: &str| o.slots.iter().position(|s| s == id).unwrap_or(usize::MAX);
+    let mut tracked_sorted: Vec<&TrackedQuest> = tracker.tracked.iter().collect();
+    tracked_sorted.sort_by_key(|t| slot(&t.quest_id));
+    for tq in tracked_sorted {
         if tq.completed {
             continue;
         }
@@ -583,6 +634,9 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             on_this_map: 0,
             filtered: 0,
             hidden: is_hidden,
+            badge: String::new(),
+            kind: OwnerKind::Quest,
+            best_filtered: 0.0,
         };
         if is_hidden {
             out.legend.push(lq);
@@ -597,6 +651,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
                 let total_here = po.markers.iter().filter(|m| m.map == map_id).count();
                 let kept: Vec<&Marker> = po.markers.iter().filter(|m| keep(m)).collect();
                 lq.filtered += total_here - kept.len();
+                lq.best_filtered = lq.best_filtered.max(best_hidden(&po.markers));
                 for mk in kept {
                     if let Some((u, v)) = to_uv(mk) {
                         here += 1;
@@ -626,12 +681,15 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         let is_hidden = o.hidden.iter().any(|h| *h == id);
         let mut lq = LegendQuest {
             quest_id: id,
-            title: if cr.qty > 1 { format!("🛠 {} ×{}", cr.title, cr.qty) } else { format!("🛠 {}", cr.title) },
+            title: if cr.qty > 1 { format!("{} ×{}", cr.title, cr.qty) } else { cr.title.clone() },
             color,
             objectives: vec![],
             on_this_map: 0,
             filtered: 0,
             hidden: is_hidden,
+            badge: String::new(),
+            kind: OwnerKind::Craft,
+            best_filtered: 0.0,
         };
         if is_hidden {
             out.legend.push(lq);
@@ -650,6 +708,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
                 let total_here = entry.markers.iter().filter(|m| m.map == map_id).count();
                 let kept: Vec<&Marker> = entry.markers.iter().filter(|m| keep(m)).collect();
                 lq.filtered += total_here - kept.len();
+                lq.best_filtered = lq.best_filtered.max(best_hidden(&entry.markers));
                 for mk in kept {
                     if let Some((u, v)) = to_uv(mk) {
                         here += 1;
@@ -669,18 +728,22 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         let qi = out.legend.len();
         let mut lq = LegendQuest {
             quest_id: format!("find:{key}"),
-            title: format!("🔍 {name}"),
+            title: name.clone(),
             color,
             objectives: vec![],
             on_this_map: 0,
             filtered: 0,
             hidden: false,
+            badge: String::new(),
+            kind: OwnerKind::Search,
+            best_filtered: 0.0,
         };
         let mut here = 0;
         if let Some(ms) = markers {
             let total_here = ms.iter().filter(|m| m.map == map_id).count();
             let kept: Vec<&Marker> = ms.iter().filter(|m| keep(m)).collect();
             lq.filtered += total_here - kept.len();
+            lq.best_filtered = best_hidden(ms);
             for mk in kept {
                 if let Some((u, v)) = to_uv(mk) {
                     here += 1;
@@ -746,10 +809,12 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         if tracked.contains(qid.as_str()) {
             continue;
         }
+        let mut spots = 0;
         for po in &pq.objectives {
             for mk in po.markers.iter().filter(|m| m.map == map_id && m.source.as_deref() == Some("objective")) {
                 let Some((u, v)) = to_uv(mk) else { continue };
                 here += 1;
+                spots += 1;
                 if quests_on {
                     let mut p = point(mk, u, v, qcolor, usize::MAX, None, false, false, &po.label);
                     p.label = po.label.clone();
@@ -758,7 +823,11 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
                 }
             }
         }
+        if spots > 0 {
+            out.available.push(AvailQuest { quest_id: qid.clone(), title: pq.title.clone(), giver: pq.giver.clone().unwrap_or_default(), spots });
+        }
     }
+    out.available.sort_by(|a, b| a.giver.cmp(&b.giver).then_with(|| a.title.cmp(&b.title)));
     // Layer indexes after the insertion point move by one.
     for p in out.points.iter_mut() {
         if let Some(l) = p.layer.as_mut() {
@@ -772,6 +841,56 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
     }
     out.points.extend(qpoints);
     out.layers.insert(li, LegendLayer { id: "quests".into(), title: o.quests_title.into(), color: qcolor, diamond: false, on: quests_on, here });
+
+    // 6. Badges: quests 1…9 in tracking order; recipes and searches A…Z.
+    let (mut nq, mut nl) = (0u32, 0u32);
+    for lq in out.legend.iter_mut() {
+        lq.badge = match lq.kind {
+            // The quest's slot when it has one (stable while tracked), otherwise its rank.
+            OwnerKind::Quest => {
+                nq += 1;
+                let n = o.slots.iter().position(|s| *s == lq.quest_id).map(|i| i as u32 + 1).unwrap_or(nq);
+                if n <= 9 { n.to_string() } else { String::new() }
+            }
+            _ => {
+                nl += 1;
+                if nl <= 26 { char::from(b'A' + (nl - 1) as u8).to_string() } else { String::new() }
+            }
+        };
+    }
+
+    // 7. Same-spot duplicates of one owner (wine and mead in the same barrel) become one point whose tooltip lists
+    //    every objective. Layer points are left as they are.
+    let mut seen: std::collections::HashMap<(usize, String, i64, i64), usize> = std::collections::HashMap::new();
+    let mut merged: Vec<DrawPoint> = Vec::with_capacity(out.points.len());
+    for p in std::mem::take(&mut out.points) {
+        let owner = match (&p.quest_ref, p.layer) {
+            (Some((q, _)), _) => Some((usize::MAX, q.clone())),
+            (None, None) => Some((p.quest, String::new())),
+            _ => None,
+        };
+        if let Some((oq, oid)) = owner {
+            let key = (oq, oid, (p.u * 8192.0).round() as i64, (p.v * 8192.0).round() as i64);
+            if let Some(&k) = seen.get(&key) {
+                // Objective label of a point (the quest-layer points carry it in `label`).
+                let obj_label = |q: &DrawPoint| q.objective.and_then(|oi| out.legend.get(q.quest).and_then(|l| l.objectives.get(oi))).map(|o| o.label.clone()).unwrap_or_else(|| q.label.clone());
+                let label = obj_label(&p);
+                let first_label = obj_label(&merged[k]);
+                let first: &mut DrawPoint = &mut merged[k];
+                if !label.is_empty() && label != first_label && !first.extra.contains(&label) {
+                    first.extra.push(label);
+                }
+                first.chance = match (first.chance, p.chance) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                continue;
+            }
+            seen.insert(key, merged.len());
+        }
+        merged.push(p);
+    }
+    out.points = merged;
     out
 }
 
@@ -790,7 +909,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests" };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests", slots: &[] };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();
