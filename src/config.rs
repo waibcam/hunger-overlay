@@ -74,6 +74,9 @@ pub struct Config {
     pub quest_markers_hidden: bool,
     /// Version that ran last (to say "updated to X" once after an update).
     pub last_version: String,
+    /// Names shown instead of the real ones (no settings UI; for screenshots and videos): key "me" for the account,
+    /// an ally or hub member id ("m_56", "u_12"…), or "hub" for the hub's name. The website account is not touched.
+    pub display_names: std::collections::HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -107,6 +110,7 @@ impl Default for Config {
             hidden_ally_quests: vec![],
             quest_markers_hidden: false,
             last_version: String::new(),
+            display_names: Default::default(),
         }
     }
 }

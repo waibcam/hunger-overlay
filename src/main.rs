@@ -616,7 +616,23 @@ impl App {
         if let Some(p) = sh.pack.as_ref() {
             d.titles = p.quests.iter().map(|(k, q)| (k.clone(), q.title.clone())).collect();
         }
-        let me_name = sh.tracker.as_ref().and_then(|t| t.user.clone()).unwrap_or_else(|| "Me".into());
+        let me_name = self.cfg.display_names.get(progress::ME).cloned().or_else(|| sh.tracker.as_ref().and_then(|t| t.user.clone())).unwrap_or_else(|| "Me".into());
+        // Hub list with the display names (screenshots / videos).
+        d.hub = d.hub.map(|r| {
+            r.map(|v| {
+                v.into_iter()
+                    .map(|mut e| {
+                        if let Some(n) = self.cfg.display_names.get(&e.id) {
+                            e.name = n.clone();
+                        }
+                        if let (Some(h), Some(n)) = (e.hub.as_mut(), self.cfg.display_names.get("hub")) {
+                            *h = n.clone();
+                        }
+                        e
+                    })
+                    .collect()
+            })
+        });
         d.subjects.push(journal::Subject {
             key: progress::ME.into(),
             initial: me_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(),
@@ -641,7 +657,11 @@ impl App {
                 .iter()
                 .take(2)
                 .filter_map(|k| {
-                    t.allies.iter().find(|a| a.id == *k).map(|a| (k.clone(), a.name.clone(), journal::Kind::Site)).or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| (k.clone(), a.name.clone(), journal::Kind::Local)))
+                    t.allies
+                        .iter()
+                        .find(|a| a.id == *k)
+                        .map(|a| (k.clone(), self.cfg.display_names.get(k).cloned().unwrap_or_else(|| a.name.clone()), journal::Kind::Site))
+                        .or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| (k.clone(), a.name.clone(), journal::Kind::Local)))
                 })
                 .collect();
             for (i, (k, name, kind)) in names.iter().enumerate() {
@@ -1833,7 +1853,14 @@ impl App {
                 .iter()
                 .take(2)
                 .map(|k| {
-                    let n = t.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone()).or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone())).unwrap_or_default();
+                    let n = self
+                        .cfg
+                        .display_names
+                        .get(k)
+                        .cloned()
+                        .or_else(|| t.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone()))
+                        .or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone()))
+                        .unwrap_or_default();
                     (k.clone(), n)
                 })
                 .collect();
