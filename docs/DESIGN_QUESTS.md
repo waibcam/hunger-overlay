@@ -58,7 +58,7 @@ The state of a quest is **derived**:
 | **Untrack** | `T -= q` | None. |
 | **Done** | `D += q`, `T -= q` | **Up:** as Track. |
 | **Reopen** (done → not done) | `D -= q` | **Down:** every descendant of `q` leaves `D` and `T`. This applies across characters too (reopening Eloise · A Warm Welcome reopens Louis, Piro and Mr Sweet). |
-| **I am here** = *Track here* (from a stepper dot or a locked row) | `q` is tracked, and every quest before it is done | Up as Track, **plus down:** descendants of `q` that are done or tracked are reset. This is "set where I am": before = done, this = in progress, after = not started. |
+| **I am here** (pin button, from a stepper dot or a locked row) | `q` is tracked, and every quest before it is done | Up as Track, **plus down:** descendants of `q` that are done or tracked are reset. This is "set where I am": before = done, this = in progress, after = not started. |
 | **Done up to here** | Done on `q` | Up only. Descendants are untouched. |
 | **Finished** (repeatables only) | `T -= q` | None. Repeatables have no done state (see open question 1). |
 
@@ -158,7 +158,7 @@ Repeatables are not part of UP NEXT. One summary line counts the available ones 
 │ › LOUIS    ✓─○─·─◉─·─·─·─·─·─·                              1 / 10 │
 │   ┌ A Gift For The Giver  Louis · step 4 of 10 ───────────────────┐ │  confirm strip
 │   │ "I am here" also marks 2 earlier quests done: Gardon's Gambit, │ │
-│   │ A Friend In Need.  [+ Track here] [✓ Done up to here] [Cancel] │ │
+│   │ A Friend In Need.  [⌖ I am here] [✓ Done up to here] [Cancel] │ │
 │   └────────────────────────────────────────────────────────────────┘ │
 │ › MR SWEET … › PIRO … › REYNAULD …                                  │
 │─────────────────────────────────────────────────────────────────────│
@@ -201,7 +201,7 @@ Repeatables are not part of UP NEXT. One summary line counts the available ones 
 | done | `[⟲ Reopen]`, with a preview when descendants are done or tracked | not shown |
 | in progress | `[✓ Done]` `[Untrack]` | `[Finished]` |
 | available | `[+ Track]` `[✓ Done]` | `[+ Track]` |
-| locked | `[+ Track here]` `[✓ Done up to here]`, both previewed | `[+ Track]`, previewed (it marks the gate done) |
+| locked | `[⌖ I am here]` `[✓ Done up to here]`, both previewed | `[+ Track]`, previewed (it marks the gate done) |
 
 A website ally's tab is **read-only**: no actions on rows. The header row offers `[Hide on map]` and `[Remove from raid]`, and a dim note says "Marius updates their quests on hunger-companion.com".
 
@@ -339,11 +339,11 @@ There are at most 2 allies in total (raids hold 3 players). The slot (A1/A2) and
 | `a_already_done` | Already done | Déjà faite |
 | `a_reopen` | Reopen | Rouvrir |
 | `a_finished` | Finished | Terminée |
-| `a_track_here` | Track here | Suivre ici |
+| `a_track_here` | I am here | J'en suis là |
 | `a_done_up_to` | Done up to here | Faites jusqu'ici |
 | `a_fix` | Fix | Corriger |
 | `j_characters` | CHARACTERS | PERSONNAGES |
-| `j_click_step` | click a step: "I am here" | cliquez une étape : « J'en suis là » |
+| `j_click_step` | click a step to say "I am here" | cliquez une étape : « J'en suis là » |
 | `j_n_done` | {n} / {t} done | {n} / {t} faites |
 | `j_step` | {giver} · step {n} of {t} | {giver} · étape {n} sur {t} |
 | `j_cascade_done` | "I am here" also marks {n} earlier quests done: | « J'en suis là » marque aussi {n} quêtes précédentes comme faites : |

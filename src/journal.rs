@@ -9,7 +9,7 @@ use crate::i18n::Strings;
 use crate::markers;
 use crate::model::HubEntry;
 use crate::panel::{ACCENT, DARK_INK, GOLD, GOLD_HI, HOVER_ROW, INK700, INK800, INK900, INK950, LINE_GOLD, T100, T200, T300, T500, WARN, WARN_TEXT, OK};
-use crate::panel::{IC_ADD_FRIEND, IC_CHECK, IC_CLOUD, IC_DOWN, IC_HIDDEN, IC_PC, IC_RIGHT, IC_SEARCH, IC_WARN};
+use crate::panel::{IC_ADD_FRIEND, IC_CHECK, IC_CLOUD, IC_DOWN, IC_HIDDEN, IC_PC, IC_PIN, IC_RIGHT, IC_SEARCH, IC_WARN};
 use crate::quests::{Change, Graph, Next, Progress, State, Write};
 use crate::render::{Font, Renderer, Rgba};
 use std::collections::{HashMap, HashSet};
@@ -1005,7 +1005,7 @@ impl Journal {
                     if !rep {
                         acts.push((Some(IC_CHECK), s.a_done_up_to.into(), 0, Hit::Strip(qid.to_string())));
                     }
-                    acts.push((None, format!("+ {}", s.a_track_here), 1, Hit::Strip(qid.to_string())));
+                    acts.push((Some(IC_PIN), s.a_track_here.into(), 1, Hit::Strip(qid.to_string())));
                 }
             }
             if g.inconsistent(prog, qid) {
@@ -1058,7 +1058,7 @@ impl Journal {
             if !reset.is_empty() {
                 sent += &format!("  {} {}", crate::i18n::count(s.j_cascade_reopen, reset.len()), self.names(&reset));
             }
-            let mut b = vec![(None, format!("+ {}", s.a_track_here), 2, Hit::Do(format!("{} {title}", s.toast_tracking), here))];
+            let mut b = vec![(Some(IC_PIN), s.a_track_here.to_string(), 2, Hit::Do(format!("{} {title}", s.toast_tracking), here))];
             if !g.is_repeatable(qid) {
                 let done = g.plan_done(prog, qid);
                 let n = done.len().saturating_sub(1);

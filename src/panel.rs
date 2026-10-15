@@ -241,6 +241,7 @@ pub(crate) const IC_EYE: &str = "\u{E7B3}";
 pub(crate) const IC_ADD_FRIEND: &str = "\u{E8FA}";
 pub(crate) const IC_CLOUD: &str = "\u{E753}";
 pub(crate) const IC_PC: &str = "\u{E7F8}";
+pub(crate) const IC_PIN: &str = "\u{E707}";
 
 /// Layer groups of the MAP LAYERS section (§4.3). Layers not listed go to the last group.
 const GROUPS: [&[&str]; 3] = [
