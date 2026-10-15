@@ -18,11 +18,14 @@ mod capture;
 mod config;
 mod detect;
 mod i18n;
+mod journal;
 mod log;
 mod markers;
 mod model;
 mod net;
 mod panel;
+mod progress;
+mod quests;
 mod render;
 mod refs;
 mod resync;
@@ -143,6 +146,12 @@ struct OpenMap {
     layers: Vec<model::LegendLayer>,
     /// Untracked quests with objectives on this map ("Available on this map").
     available: Vec<model::AvailQuest>,
+    /// Raid allies (panel rows).
+    allies: Vec<model::AllyRow>,
+    /// "Up next": quests the player can start now (when the website publishes prerequisites).
+    up_next: Vec<panel::UpRow>,
+    /// Number of repeatable quests the player can start.
+    repeat_avail: usize,
     /// Version of the shared data the points were built from (rebuilt when it changes).
     data_version: u64,
 }
@@ -285,8 +294,19 @@ struct App {
     panel_scroll: f32,
     /// Message under the panel header and when it appeared.
     toast: Option<(panel::Toast, Instant)>,
-    /// Last quest tracked from the app (quest id, title), for "Undo".
-    last_track: Option<(String, String)>,
+    /// Last change made from the app (history record id), for the toast's "Undo".
+    last_record: Option<u64>,
+    /// Prerequisite graph of the quests (rebuilt when the pack changes) and the pack version it was built from.
+    graph: quests::Graph,
+    graph_pack: String,
+    /// Undo history of the quest changes (history.json).
+    history: progress::History,
+    /// Allies without the app or an account, kept on this PC (allies.json).
+    locals: progress::LocalAllies,
+    /// Quest journal window, when open.
+    journal: Option<journal::Journal>,
+    /// Last tab of the journal.
+    journal_tab: String,
     /// Quest tracked a few seconds ago (gets a "NEW" tag in the panel).
     recent_track: Option<(String, Instant)>,
     /// "Available on this map" fully listed.
@@ -529,6 +549,9 @@ impl App {
             panel::Action::RemoveSearch(k) => m.legend.iter().position(|q| q.quest_id == format!("find:{k}")).map(Spot::Owner),
             panel::Action::ToggleLayer(id) => m.layers.iter().position(|l| l.id == *id && l.on).map(Spot::Layer),
             panel::Action::Track(q) | panel::Action::AvailRow(q) => Some(Spot::Quest(q.clone())),
+            panel::Action::Done(q) => m.legend.iter().position(|l| l.quest_id == *q).map(Spot::Owner),
+            panel::Action::ToggleAlly(k) => m.allies.iter().position(|a| a.key == *k).map(Spot::Ally),
+            panel::Action::ToggleAllyQuest(k, q) | panel::Action::RemoveAllyQuest(k, q) => m.allies.iter().position(|a| a.key == *k).map(|i| Spot::AllyQuest(i, q.clone())),
             _ => None,
         }
     }
@@ -543,13 +566,401 @@ impl App {
     /// This is the app's only write to the website (`POST /me/track`, see `net.rs`); it happens only on an
     /// explicit user action (Ctrl+click on a Quests-layer marker, "+ Track", "Undo", or the search window).
     fn track_quest(&mut self, qid: String, title: String, tracked: bool) {
-        logf!("track {qid} → {tracked}");
-        let _ = self.net.send(Req::Track { quest_id: qid.clone(), tracked });
+        let p = self.progress_of(progress::ME);
+        let changes = if tracked { self.graph.plan_track(&p, &qid) } else { self.graph.plan_untrack(&p, &qid) };
         let s = self.s;
-        let text = format!("{} {title}", if tracked { s.toast_tracking } else { s.toast_undone });
-        self.toast = Some((panel::Toast { text, ok: true, undo: tracked }, Instant::now()));
-        self.last_track = tracked.then(|| (qid.clone(), title));
-        self.recent_track = tracked.then(|| (qid, Instant::now()));
+        let label = format!("{} {title}", if tracked { s.toast_tracking } else { s.toast_undone });
+        if self.run_change(progress::ME, label, changes).is_some() && tracked {
+            self.recent_track = Some((qid, Instant::now()));
+        }
+    }
+
+    /// Opens the quest journal (optionally at a quest, or on the "+ally" tab), or brings it to the front.
+    fn open_journal(&mut self, at: Option<String>) {
+        self.refresh_graph();
+        let d = self.journal_data();
+        let target = at.clone().unwrap_or_else(|| self.journal_tab.clone());
+        if target == journal::ADD_TAB {
+            self.shared.lock().unwrap().hub = None;
+            let _ = self.net.send(Req::FetchHub);
+        }
+        if let Some(j) = self.journal.as_mut() {
+            j.set_data(d);
+            if at.is_some() {
+                j.goto(&target);
+            }
+            unsafe {
+                let _ = SetForegroundWindow(j.hwnd);
+            }
+            return;
+        }
+        self.journal = journal::Journal::open(self.s, d, target, self.client);
+    }
+
+    /// Hands fresh data to the open journal.
+    fn refresh_journal(&mut self) {
+        if self.journal.is_some() {
+            let d = self.journal_data();
+            if let Some(j) = self.journal.as_mut() {
+                j.set_data(d);
+            }
+        }
+    }
+
+    /// Everything the journal shows: the player and the allies, their progression, titles, badges, undo history.
+    fn journal_data(&self) -> journal::Data {
+        let sh = self.shared.lock().unwrap();
+        let mut d = journal::Data { graph: self.graph.clone(), v12: sh.tracker.as_ref().map(|t| t.completed.is_some()).unwrap_or(false), ..Default::default() };
+        d.synced = matches!(sh.status, Some(Status::Ok));
+        d.hub = sh.hub.clone();
+        if let Some(p) = sh.pack.as_ref() {
+            d.titles = p.quests.iter().map(|(k, q)| (k.clone(), q.title.clone())).collect();
+        }
+        let me_name = sh.tracker.as_ref().and_then(|t| t.user.clone()).unwrap_or_else(|| "Me".into());
+        d.subjects.push(journal::Subject {
+            key: progress::ME.into(),
+            initial: me_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(),
+            name: me_name,
+            color: (0.831, 0.686, 0.416),
+            kind: journal::Kind::Me,
+            hidden: false,
+        });
+        if let Some(t) = sh.tracker.as_ref() {
+            d.progress.insert(progress::ME.into(), progress::me_progress(t));
+            // Badges and colours of my tracked quests (stable slots).
+            for q in &t.tracked {
+                if let Some(slot) = self.cfg.quest_slots.iter().position(|x| *x == q.quest_id) {
+                    let b = if slot < 9 { (slot + 1).to_string() } else { String::new() };
+                    d.badges.insert(q.quest_id.clone(), (b, model::parse_color(&q.color)));
+                }
+            }
+            // Allies in adding order (at most 2).
+            let names: Vec<(String, String, journal::Kind)> = self
+                .cfg
+                .ally_order
+                .iter()
+                .take(2)
+                .filter_map(|k| {
+                    t.allies.iter().find(|a| a.id == *k).map(|a| (k.clone(), a.name.clone(), journal::Kind::Site)).or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| (k.clone(), a.name.clone(), journal::Kind::Local)))
+                })
+                .collect();
+            for (i, (k, name, kind)) in names.iter().enumerate() {
+                let other = names.get(1 - i.min(1)).filter(|_| names.len() == 2).map(|o| o.1.as_str());
+                let p = match kind {
+                    journal::Kind::Local => self.locals.allies.iter().find(|a| a.id == *k).map(|a| a.progress()).unwrap_or_default(),
+                    _ => t
+                        .allies
+                        .iter()
+                        .find(|a| a.id == *k)
+                        .map(|a| {
+                            let mut p = quests::Progress::default();
+                            p.done.extend(a.completed.clone().unwrap_or_default());
+                            p.tracked.extend(a.tracked.iter().filter(|q| !q.completed).map(|q| q.quest_id.clone()));
+                            p
+                        })
+                        .unwrap_or_default(),
+                };
+                d.progress.insert(k.clone(), p);
+                d.subjects.push(journal::Subject {
+                    key: k.clone(),
+                    initial: progress::initials(name, other),
+                    name: name.clone(),
+                    color: progress::ALLY_COLORS[i],
+                    kind: kind.clone(),
+                    hidden: self.cfg.hidden_allies.contains(k),
+                });
+            }
+        }
+        drop(sh);
+        // Undo history per subject, newest first, with the quests changed elsewhere since.
+        let now = progress::now_secs();
+        for sub in &d.subjects {
+            let cur = d.progress.get(&sub.key).cloned().unwrap_or_default();
+            let v: Vec<journal::HistoryEntry> = self.history.of(&sub.key).into_iter().map(|r| (r.id, r.label.clone(), now.saturating_sub(r.at), r.conflicts(&cur))).collect();
+            d.history.insert(sub.key.clone(), v);
+        }
+        // Markers on the open map, per quest.
+        if let MapState::Open(m) = &self.state {
+            for l in &m.legend {
+                d.spots.insert(l.quest_id.clone(), l.on_this_map);
+            }
+            for a in &m.available {
+                d.spots.entry(a.quest_id.clone()).or_insert(a.spots);
+            }
+        }
+        d
+    }
+
+    /// A command from the journal.
+    fn journal_cmd(&mut self, c: journal::Cmd) {
+        match c {
+            journal::Cmd::Apply { subject, label, changes } => {
+                self.run_change(&subject, label, changes);
+            }
+            journal::Cmd::Undo(id) => self.undo_record(id),
+            journal::Cmd::UndoTo(subject, id) => {
+                // This record and every newer one of the subject, merged into one write (each quest goes back to its
+                // state before the oldest of them).
+                let recs: Vec<progress::Record> = {
+                    let all = self.history.of(&subject);
+                    let n = all.iter().position(|r| r.id == id).map(|i| i + 1).unwrap_or(0);
+                    all.into_iter().take(n).cloned().collect()
+                };
+                if let Some(oldest) = recs.last().cloned() {
+                    let mut merged: Vec<(String, quests::Write)> = vec![];
+                    for r in &recs {
+                        for o in &r.ops {
+                            match merged.iter_mut().find(|m| m.0 == o.quest) {
+                                Some(m) => m.1 = o.from,
+                                None => merged.push((o.quest.clone(), o.from)),
+                            }
+                        }
+                    }
+                    let ops: Vec<progress::Op> = merged.iter().map(|(q, w)| progress::Op { quest: q.clone(), from: *w, to: *w, slot: None }).collect();
+                    // Replace them by one synthetic record and undo it.
+                    for r in &recs {
+                        self.history.remove(r.id);
+                    }
+                    let rid = self.history.next_id();
+                    self.history.push(progress::Record { id: rid, subject: subject.clone(), label: oldest.label.clone(), at: oldest.at, ops });
+                    self.undo_record(rid);
+                }
+            }
+            journal::Cmd::AddSiteAlly(id) => {
+                let mut ids: Vec<String> = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.allies.iter().map(|a| a.id.clone()).collect()).unwrap_or_default();
+                if !ids.contains(&id) && ids.len() + self.locals.allies.len() < 2 {
+                    ids.push(id.clone());
+                    self.cfg.ally_order.retain(|k| *k != id);
+                    self.cfg.ally_order.push(id);
+                    self.cfg.save();
+                    let _ = self.net.send(Req::SetAllies(ids));
+                }
+            }
+            journal::Cmd::AddLocalAlly(name) => {
+                let n_site = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.allies.len()).unwrap_or(0);
+                if n_site + self.locals.allies.len() < 2 {
+                    let id = format!("l_{}", progress::now_secs());
+                    self.locals.allies.push(progress::LocalAlly { id: id.clone(), name: name.chars().take(24).collect(), done: vec![], tracked: vec![] });
+                    self.locals.save();
+                    self.cfg.ally_order.push(id.clone());
+                    self.cfg.save();
+                    self.journal_tab = id.clone();
+                    let d = self.journal_data();
+                    if let Some(j) = self.journal.as_mut() {
+                        j.set_data(d);
+                        j.goto(&id);
+                    }
+                }
+            }
+            journal::Cmd::RemoveAlly(k) => {
+                if self.locals.allies.iter().any(|a| a.id == k) {
+                    self.locals.allies.retain(|a| a.id != k);
+                    self.locals.save();
+                } else {
+                    let ids: Vec<String> = self.shared.lock().unwrap().tracker.as_ref().map(|t| t.allies.iter().map(|a| a.id.clone()).filter(|x| *x != k).collect()).unwrap_or_default();
+                    let _ = self.net.send(Req::SetAllies(ids));
+                }
+                self.cfg.ally_order.retain(|x| *x != k);
+                self.cfg.hidden_allies.retain(|x| *x != k);
+                self.cfg.hidden_ally_quests.retain(|x| !x.starts_with(&format!("{k}|")));
+                self.cfg.save();
+            }
+            journal::Cmd::HideAlly(k) => {
+                if let Some(p) = self.cfg.hidden_allies.iter().position(|x| *x == k) {
+                    self.cfg.hidden_allies.remove(p);
+                } else {
+                    self.cfg.hidden_allies.push(k);
+                }
+                self.cfg.save();
+            }
+            journal::Cmd::FetchHub => {
+                self.shared.lock().unwrap().hub = None;
+                let _ = self.net.send(Req::FetchHub);
+            }
+            journal::Cmd::Tab(t) => self.journal_tab = t,
+        }
+        if let MapState::Open(m) = &mut self.state {
+            m.data_version = u64::MAX;
+        }
+        self.dirty = true;
+        self.refresh_journal();
+    }
+
+    /// Closes the journal and gives the focus back to the game.
+    fn close_journal(&mut self) {
+        if let Some(j) = self.journal.take() {
+            self.journal_tab = j.tab.clone();
+            j.close();
+        }
+        unsafe {
+            let mut game = HWND::default();
+            let _ = EnumWindows(Some(find_game), LPARAM(&mut game as *mut HWND as isize));
+            if !game.is_invalid() {
+                let _ = SetForegroundWindow(game);
+            }
+        }
+    }
+
+    // ---------- Quest progression (docs/DESIGN_QUESTS.md §2) ----------
+
+    /// Rebuilds the prerequisite graph when the pack changed.
+    fn refresh_graph(&mut self) {
+        let sh = self.shared.lock().unwrap();
+        if let Some(p) = sh.pack.as_ref() {
+            if p.pack_version != self.graph_pack {
+                self.graph = quests::Graph::from_pack(p);
+                self.graph_pack = p.pack_version.clone();
+            }
+        }
+    }
+
+    /// Progression of a subject: "me" (the website tracker) or a local ally.
+    fn progress_of(&self, subject: &str) -> quests::Progress {
+        if subject == progress::ME {
+            return self.shared.lock().unwrap().tracker.as_ref().map(progress::me_progress).unwrap_or_default();
+        }
+        if let Some(a) = self.locals.allies.iter().find(|a| a.id == subject) {
+            return a.progress();
+        }
+        // A website ally (read-only).
+        let sh = self.shared.lock().unwrap();
+        sh.tracker
+            .as_ref()
+            .and_then(|t| t.allies.iter().find(|a| a.id == subject))
+            .map(|a| {
+                let mut p = quests::Progress::default();
+                p.done.extend(a.completed.clone().unwrap_or_default());
+                for q in &a.tracked {
+                    if !q.completed {
+                        p.tracked.insert(q.quest_id.clone());
+                    }
+                }
+                p
+            })
+            .unwrap_or_default()
+    }
+
+    /// True when the website supports the full progression (contract v1.2: `completed` in the tracker).
+    fn site_v12(&self) -> bool {
+        self.shared.lock().unwrap().tracker.as_ref().map(|t| t.completed.is_some()).unwrap_or(false)
+    }
+
+    /// Title of a quest in the current language (its id if unknown).
+    fn quest_title(&self, q: &str) -> String {
+        self.shared.lock().unwrap().pack.as_ref().and_then(|p| p.quests.get(q)).map(|x| x.title.clone()).unwrap_or_else(|| q.to_string())
+    }
+
+    /// Sends changes of the player's progression to the website: one atomic write (v1.2), or, on a website
+    /// without it, single track / untrack calls. Returns false when the website cannot do it yet.
+    fn send_changes(&mut self, changes: &[quests::Change]) -> bool {
+        // Order of the batch: first what stops being tracked (frees its colour on the website), then "done", then
+        // "tracked" (which takes the first free colour). So an undo gives a quest its colour back.
+        let mut changes = changes.to_vec();
+        changes.sort_by_key(|(_, w)| match w {
+            quests::Write::None => 0,
+            quests::Write::Done => 1,
+            quests::Write::Tracked => 2,
+        });
+        let changes = &changes[..];
+        if self.site_v12() {
+            // The revision of the player's own progression (an ally changing must not cause a conflict).
+            let base_rev = self.shared.lock().unwrap().tracker.as_ref().and_then(|t| t.progress_rev.clone().or_else(|| t.rev.clone()));
+            let _ = self.net.send(Req::SetQuests { changes: changes.iter().map(|(q, w)| (q.clone(), w.as_str())).collect(), base_rev });
+            return true;
+        }
+        if changes.iter().any(|(_, w)| *w == quests::Write::Done) {
+            return false;
+        }
+        for (q, w) in changes {
+            let _ = self.net.send(Req::Track { quest_id: q.clone(), tracked: *w == quests::Write::Tracked });
+        }
+        true
+    }
+
+    /// Commits one user action on a subject's progression: keeps its exact "before" states in the history (undo),
+    /// then writes it (the website for "me", allies.json for a local ally) and shows a toast with Undo.
+    /// Returns the history record id.
+    fn run_change(&mut self, subject: &str, label: String, changes: Vec<quests::Change>) -> Option<u64> {
+        if changes.is_empty() {
+            return None;
+        }
+        let before = self.progress_of(subject);
+        let ops: Vec<progress::Op> = changes
+            .iter()
+            .map(|(q, w)| {
+                let from = quests::write_state(&before, q);
+                let slot = (subject == progress::ME && from == quests::Write::Tracked).then(|| self.cfg.quest_slots.iter().position(|s| s == q)).flatten();
+                progress::Op { quest: q.clone(), from, to: *w, slot }
+            })
+            .collect();
+        logf!("change on {subject}: {} quest(s)", ops.len());
+        if subject == progress::ME {
+            if !self.send_changes(&changes) {
+                self.toast = Some((panel::Toast { text: self.s.toast_needs_site.into(), ok: false, undo: false, next: None }, Instant::now()));
+                self.dirty = true;
+                return None;
+            }
+        } else if let Some(a) = self.locals.get_mut(subject) {
+            a.apply(&changes);
+            self.locals.save();
+            if let MapState::Open(m) = &mut self.state {
+                m.data_version = u64::MAX;
+            }
+        } else {
+            return None; // website allies are read-only
+        }
+        let id = self.history.next_id();
+        self.history.push(progress::Record { id, subject: subject.to_string(), label: label.clone(), at: progress::now_secs(), ops });
+        self.last_record = Some(id);
+        // Next quest of the same character after a "done" (the "propose the next one" loop).
+        let after = quests::apply(&before, &changes);
+        let next = changes
+            .iter()
+            .rev()
+            .find(|(_, w)| *w == quests::Write::Done)
+            .and_then(|(q, _)| match self.graph.up_next(&after, self.graph.giver(q)) {
+                Some(quests::Next::Available(n)) if subject == progress::ME => Some((n.clone(), self.quest_title(&n))),
+                _ => None,
+            });
+        self.toast = Some((panel::Toast { text: label, ok: true, undo: true, next }, Instant::now()));
+        self.dirty = true;
+        Some(id)
+    }
+
+    /// Undoes a recorded change: writes back the exact "before" states (badge numbers included).
+    fn undo_record(&mut self, id: u64) {
+        let Some(r) = self.history.records.iter().find(|r| r.id == id).cloned() else { return };
+        let changes = r.undo_changes();
+        if r.subject == progress::ME {
+            // An untracked quest gets its old number (and so its colour on the map) back.
+            for o in r.ops.iter().filter(|o| o.from == quests::Write::Tracked) {
+                if let Some(slot) = o.slot {
+                    if self.cfg.quest_slots.len() <= slot {
+                        self.cfg.quest_slots.resize(slot + 1, String::new());
+                    }
+                    if self.cfg.quest_slots[slot].is_empty() {
+                        self.cfg.quest_slots[slot] = o.quest.clone();
+                    }
+                }
+            }
+            self.cfg.save();
+            if !self.send_changes(&changes) {
+                self.toast = Some((panel::Toast { text: self.s.toast_needs_site.into(), ok: false, undo: false, next: None }, Instant::now()));
+                self.dirty = true;
+                return;
+            }
+        } else if let Some(a) = self.locals.get_mut(&r.subject) {
+            a.apply(&changes);
+            self.locals.save();
+            if let MapState::Open(m) = &mut self.state {
+                m.data_version = u64::MAX;
+            }
+        }
+        self.history.remove(id);
+        self.last_record = None;
+        self.recent_track = None;
+        let text = self.s.toast_undone_change.replace("{label}", &r.label);
+        self.toast = Some((panel::Toast { text, ok: true, undo: false, next: None }, Instant::now()));
         self.dirty = true;
     }
 
@@ -628,20 +1039,63 @@ impl App {
                 return;
             }
             panel::Action::Track(qid) => {
-                let title = match &self.state {
-                    MapState::Open(m) => m.available.iter().find(|a| a.quest_id == qid).map(|a| a.title.clone()).unwrap_or_default(),
-                    _ => String::new(),
-                };
+                let p = self.progress_of(progress::ME);
+                if self.graph.plan_track(&p, &qid).len() > 1 {
+                    self.open_journal(Some(qid));
+                    return;
+                }
+                let title = self.quest_title(&qid);
                 self.track_quest(qid, title, true);
                 return;
             }
             panel::Action::Undo => {
-                if let Some((qid, title)) = self.last_track.take() {
-                    self.track_quest(qid, title, false);
+                if let Some(id) = self.last_record.take() {
+                    self.undo_record(id);
                 }
                 return;
             }
             panel::Action::AvailRow(_) => return,
+            // ✓ on a tracked quest: done (it never cascades from the panel; if it would, the journal shows the preview).
+            panel::Action::Done(qid) => {
+                let p = self.progress_of(progress::ME);
+                let plan = self.graph.plan_done(&p, &qid);
+                if plan.len() > 1 {
+                    self.open_journal(Some(qid));
+                    return;
+                }
+                let title = self.quest_title(&qid);
+                let label = if self.graph.is_repeatable(&qid) { self.s.toast_finished } else { self.s.toast_done }.replace("{quest}", &title);
+                self.run_change(progress::ME, label, plan);
+                return;
+            }
+            panel::Action::Journal => {
+                self.open_journal(None);
+                return;
+            }
+            panel::Action::ManageAllies => {
+                self.open_journal(Some("+ally".into()));
+                return;
+            }
+            panel::Action::ToggleAlly(k) => {
+                if let Some(p) = self.cfg.hidden_allies.iter().position(|x| *x == k) {
+                    self.cfg.hidden_allies.remove(p);
+                } else {
+                    self.cfg.hidden_allies.push(k);
+                }
+            }
+            panel::Action::ToggleAllyQuest(k, q) => {
+                let id = format!("{k}|{q}");
+                if let Some(p) = self.cfg.hidden_ally_quests.iter().position(|x| *x == id) {
+                    self.cfg.hidden_ally_quests.remove(p);
+                } else {
+                    self.cfg.hidden_ally_quests.push(id);
+                }
+            }
+            panel::Action::RemoveAllyQuest(k, q) => {
+                let label = self.s.toast_undone.to_string() + " " + &self.quest_title(&q);
+                self.run_change(&k, label, vec![(q, quests::Write::None)]);
+                return;
+            }
             panel::Action::MoreAvail => {
                 self.avail_open = !self.avail_open;
                 self.dirty = true;
@@ -1153,6 +1607,9 @@ impl App {
             legend: vec![],
             layers: vec![],
             available: vec![],
+            allies: vec![],
+            up_next: vec![],
+            repeat_avail: 0,
             data_version: u64::MAX,
         }
     }
@@ -1240,6 +1697,7 @@ impl App {
     /// Also picks up what the network thread has received (status, key validation, update notice, search
     /// data) and asks it for missing search data. No game data is involved: everything comes from the website.
     fn sync_data(&mut self) {
+        self.refresh_graph();
         // Interface language: the one chosen in the settings, otherwise Windows' (English when not offered).
         let s = i18n::t_for(&self.cfg.locale);
         if !std::ptr::eq(s, self.s) {
@@ -1281,7 +1739,7 @@ impl App {
         }
         if let (Some(st), Some(ix)) = (self.search.as_mut(), sh.search_index.as_ref()) {
             if !st.has_entries() {
-                st.set_entries(search_entries(Some(ix), sh.pack.as_ref(), sh.tracker.as_ref()));
+                st.set_entries(search_entries(Some(ix), sh.pack.as_ref(), sh.tracker.as_ref(), &self.graph, self.s));
             }
         }
         // Write refused by the website (quest tracking): tell the user.
@@ -1291,9 +1749,9 @@ impl App {
                 "readonly" => self.s.track_readonly,
                 _ => self.s.track_failed,
             };
-            self.toast = Some((panel::Toast { text: msg.to_string(), ok: false, undo: false }, Instant::now()));
+            self.toast = Some((panel::Toast { text: msg.to_string(), ok: false, undo: false, next: None }, Instant::now()));
             self.recent_track = None;
-            self.last_track = None;
+            self.last_record = None;
             self.dirty = true;
             // Read-only key: the tray notification links to the website page where the key can be changed.
             if n == "readonly" {
@@ -1356,17 +1814,96 @@ impl App {
                 harvest_title: self.s.harvest_layer,
                 quests_title: self.s.quests_layer,
                 slots: &self.cfg.quest_slots,
+                allies: vec![],
+                startable: None,
             };
+            // The player's progression and what can be started now (only when the website publishes prerequisites).
+            let me = progress::me_progress(t);
+            let chains = self.graph.has_chains();
+            let startable: std::collections::HashSet<String> = if chains {
+                p.quests.keys().filter(|q| self.graph.state(&me, q) == quests::State::Available).cloned().collect()
+            } else {
+                Default::default()
+            };
+            // Raid allies: website ones (chosen on the website, delivered with the tracker) and local ones, in adding
+            // order; at most 2.
+            let mut keys: Vec<String> = t.allies.iter().map(|a| a.id.clone()).chain(self.locals.allies.iter().map(|a| a.id.clone())).collect();
+            keys.dedup();
+            self.cfg.ally_order.retain(|k| keys.contains(k));
+            for k in &keys {
+                if !self.cfg.ally_order.contains(k) {
+                    self.cfg.ally_order.push(k.clone());
+                }
+            }
+            let names: Vec<(String, String)> = self
+                .cfg
+                .ally_order
+                .iter()
+                .take(2)
+                .map(|k| {
+                    let n = t.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone()).or_else(|| self.locals.allies.iter().find(|a| a.id == *k).map(|a| a.name.clone())).unwrap_or_default();
+                    (k.clone(), n)
+                })
+                .collect();
+            let allies: Vec<model::AllyIn> = names
+                .iter()
+                .enumerate()
+                .map(|(i, (k, name))| {
+                    let other = names.get(1 - i.min(1)).filter(|_| names.len() == 2).map(|o| o.1.as_str());
+                    let tracked: Vec<(String, Vec<String>, bool)> = match t.allies.iter().find(|a| a.id == *k) {
+                        Some(a) => a
+                            .tracked
+                            .iter()
+                            .filter(|q| !q.completed)
+                            .map(|q| (q.quest_id.clone(), q.objectives.iter().filter(|o| o.state == "done").map(|o| o.objective_key.clone()).collect(), self.cfg.hidden_ally_quests.contains(&format!("{k}|{}", q.quest_id))))
+                            .collect(),
+                        None => self.locals.allies.iter().find(|a| a.id == *k).map(|a| a.tracked.iter().map(|q| (q.clone(), vec![], self.cfg.hidden_ally_quests.contains(&format!("{k}|{q}")))).collect()).unwrap_or_default(),
+                    };
+                    model::AllyIn {
+                        key: k.clone(),
+                        name: name.clone(),
+                        initial: progress::initials(name, other),
+                        color: progress::ALLY_COLORS[i],
+                        site: k.starts_with("u_") || t.allies.iter().any(|a| a.id == *k),
+                        hidden: self.cfg.hidden_allies.contains(k),
+                        tracked,
+                    }
+                })
+                .collect();
+            let opts = model::ViewOpts { allies, startable: chains.then_some(&startable), ..opts };
             let v = model::build_view(p, t, &opts);
             m.points = v.points;
             m.legend = v.legend;
             m.layers = v.layers;
             m.available = v.available;
+            m.allies = v.allies;
+            // Up next: the first startable quest of each character, then (Quests layer on) the other startable quests
+            // with spots on this map.
+            m.up_next.clear();
+            m.repeat_avail = 0;
+            if chains {
+                for (g, n) in self.graph.suggestions(&me) {
+                    if let quests::Next::Available(q) = n {
+                        let here = m.available.iter().any(|a| a.quest_id == q);
+                        m.up_next.push(panel::UpRow { title: p.quests.get(&q).map(|x| x.title.clone()).unwrap_or_default(), giver: g, step: self.graph.step(&q), here, quest_id: q });
+                    }
+                }
+                if self.cfg.layers_on.iter().any(|l| l == "quests") {
+                    for a in &m.available {
+                        if !m.up_next.iter().any(|u| u.quest_id == a.quest_id) && !self.graph.is_repeatable(&a.quest_id) {
+                            m.up_next.push(panel::UpRow { quest_id: a.quest_id.clone(), title: a.title.clone(), giver: a.giver.clone(), step: self.graph.step(&a.quest_id), here: true });
+                        }
+                    }
+                }
+                m.repeat_avail = startable.iter().filter(|q| self.graph.is_repeatable(q)).count();
+            }
         } else {
             m.points.clear();
             m.legend.clear();
             m.layers.clear();
             m.available.clear();
+            m.allies.clear();
+            m.up_next.clear();
         }
         self.dirty = true;
     }
@@ -1548,7 +2085,7 @@ impl App {
     /// Puts the settings and search windows back above the overlay and the panel (all are "topmost"; the last one
     /// shown would otherwise cover them).
     fn raise_dialogs(&self) {
-        let dialogs = [self.settings.as_ref().map(|s| s.hwnd), self.search.as_ref().map(|s| s.hwnd)];
+        let dialogs = [self.settings.as_ref().map(|s| s.hwnd), self.search.as_ref().map(|s| s.hwnd), self.journal.as_ref().map(|j| j.hwnd)];
         for h in dialogs.into_iter().flatten() {
             unsafe {
                 let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1586,6 +2123,7 @@ impl App {
         if !self.renderer.begin(gw, gh) {
             return;
         }
+        let can_done = self.site_v12();
         let MapState::Open(m) = &self.state else {
             self.renderer.present(self.overlay, gx, gy);
             return;
@@ -1627,6 +2165,10 @@ impl App {
                 locale: &self.cfg.locale,
                 quests_new: !self.cfg.quests_layer_seen,
                 recent: self.recent_track.as_ref().map(|t| t.0.as_str()),
+                up_next: &m.up_next,
+                repeat_avail: m.repeat_avail,
+                can_done: can_done,
+                allies: &m.allies,
                 uncertain: m.uncertain,
                 compact: 0,
                 scroll: 0.0,
@@ -1673,7 +2215,8 @@ impl App {
                 .collect()
         };
         let z = self.zoom_z(m);
-        let items = scene::build(&scene::Input { visible: &visible, points: &m.points, legend: &m.legend, layers: &m.layers, zoom: z, sc, spot: self.spot.as_ref() });
+        let initials: Vec<String> = m.allies.iter().map(|a| a.initial.clone()).collect();
+        let items = scene::build(&scene::Input { visible: &visible, points: &m.points, legend: &m.legend, layers: &m.layers, zoom: z, sc, spot: self.spot.as_ref(), ally_initials: &initials });
         let hovered = self.hover.and_then(|h| items.iter().position(|it| it.members[0] == h));
         let lit = |it: &scene::Item| self.spot.as_ref().map(|s| it.lit(s, &m.points)).unwrap_or(true);
         let dim = |it: &scene::Item| if lit(it) { 1.0 } else { 0.35 };
@@ -1699,6 +2242,15 @@ impl App {
             markers::draw(r, it.kind, it.color, &it.badge, it.x, it.y, kk, sc, dim(it));
             if it.members.len() > 1 {
                 markers::count_pill(r, it.members.len(), it.color, it.x, it.y, sc, dim(it));
+            }
+            // Allies on the same spot for the same quest: pips on my marker.
+            let mut pips: Vec<usize> = it.members.iter().flat_map(|&pi| m.points[pi].pips.iter().copied()).collect();
+            pips.sort();
+            pips.dedup();
+            for ai in pips {
+                if let Some(a) = m.allies.get(ai) {
+                    markers::pip(r, it.x, it.y, it.radius(k), ai, a.color, &a.initial, k, dim(it));
+                }
             }
         }
         // Spotlight pulse: once, or twice for the quests of the "Available on this map" list.
@@ -1825,7 +2377,7 @@ impl App {
         }
         let (entries, loaded) = {
             let sh = self.shared.lock().unwrap();
-            (search_entries(sh.search_index.as_ref(), sh.pack.as_ref(), sh.tracker.as_ref()), sh.search_index.is_some())
+            (search_entries(sh.search_index.as_ref(), sh.pack.as_ref(), sh.tracker.as_ref(), &self.graph, self.s), sh.search_index.is_some())
         };
         if !loaded && !self.index_requested {
             self.index_requested = true;
@@ -1838,14 +2390,24 @@ impl App {
     fn search_pick(&mut self, key: String) {
         // Quest: track / untrack (written to the website account; the website returns the new tracker).
         if let Some(qid) = key.strip_prefix("quest:") {
-            let (tracked, title) = {
-                let sh = self.shared.lock().unwrap();
-                let tracked = sh.tracker.as_ref().map(|t| t.tracked.iter().any(|q| q.quest_id == qid)).unwrap_or(false);
-                let title = sh.pack.as_ref().and_then(|p| p.quests.get(qid)).map(|q| q.title.clone()).unwrap_or_default();
-                (tracked, title)
-            };
-            self.track_quest(qid.to_string(), title, !tracked);
+            // Available: tracked at once (toast + Undo). Tracked: nothing to do. Locked or done: opens the journal on
+            // it, where the cascade is previewed (the search never cascades on its own).
+            let me = self.progress_of(progress::ME);
+            let st = self.graph.state(&me, qid);
             self.close_search();
+            match st {
+                quests::State::Available => {
+                    let title = self.quest_title(qid);
+                    self.track_quest(qid.to_string(), title, true);
+                }
+                quests::State::Tracked => {}
+                _ if self.graph.has_chains() => self.open_journal(Some(qid.to_string())),
+                // Website without prerequisites: plain track / untrack, as before.
+                _ => {
+                    let title = self.quest_title(qid);
+                    self.track_quest(qid.to_string(), title, !me.tracked.contains(qid));
+                }
+            }
             return;
         }
         // Item: remember it in the settings and download its (public) marker file.
@@ -2092,6 +2654,7 @@ fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
     let mut t = TipSection { color: it.color, eyebrow: String::new(), title: String::new(), lines: vec![], chance: None, footer: None, footer_height: None };
     let owner = match it.owner {
         scene::Owner::Legend(q) => m.legend.get(q).map(|lq| format!("{} · {}", lq.badge, lq.title.to_uppercase()).trim_start_matches(" · ").to_string()),
+        scene::Owner::Ally(a) => m.allies.get(a).map(|al| format!("{} · {} · {}", al.initial, al.name.to_uppercase(), s.k_ally)),
         scene::Owner::Layer(_) => None,
     };
     let layer = p.layer.and_then(|li| m.layers.get(li));
@@ -2165,10 +2728,41 @@ fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
         } else {
             s.h_high
         };
-        let v = if h.abs() < 0.5 { what.to_string() } else { format!("{h:+.1} m · {what}") };
+        // Approximate (ground grid of 7.5-10 m: up to ±10 m off near cliffs and banks), hence the "≈".
+        let v = if h.abs() < 0.5 { what.to_string() } else { format!("≈ {h:+.1} m · {what}") };
         t.footer_height = Some((s.t_height.to_string(), v));
     }
+    // My marker carrying allies' pips: "Also for: Marius (M)".
+    let also: Vec<String> = it.members.iter().flat_map(|&i| m.points[i].pips.iter().copied()).filter_map(|a| m.allies.get(a).map(|al| format!("{} ({})", al.name, al.initial))).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     match (it.owner, it.kind) {
+        // A raid ally's objective: quest, objective, container and chance.
+        (scene::Owner::Ally(ai), kind) => {
+            let al = m.allies.get(ai);
+            let quest = p.ally.as_ref().and_then(|(_, q)| al.and_then(|a| a.quests.iter().find(|x| x.0 == *q)).map(|x| x.1.clone())).unwrap_or_default();
+            let what = if p.harvest.is_some() {
+                s.k_harvest
+            } else if p.placed {
+                s.k_placed
+            } else if p.chance.is_some() || p.container.is_some() {
+                s.k_container
+            } else {
+                s.k_objective
+            };
+            t.eyebrow = format!("{} · {what}", owner.unwrap_or_default());
+            t.title = match (&p.harvest, kind) {
+                (Some(h), _) => h.node.clone().unwrap_or_else(|| p.label.clone()),
+                _ if p.chance.is_some() || p.container.is_some() => container_of(p).unwrap_or_else(|| p.label.clone()),
+                _ => p.label.clone(),
+            };
+            t.lines.push((s.t_quest.into(), quest));
+            if t.title != p.label {
+                t.lines.push((String::new(), p.label.clone()));
+            }
+            if al.map(|a| !a.site).unwrap_or(false) {
+                t.lines.push((s.t_added_by_you.into(), s.t_local_ally.into()));
+            }
+            t.chance = p.chance;
+        }
         // Untracked quest (Quests layer).
         (_, markers::Kind::QuestAvail) => {
             t.eyebrow = s.k_quest_avail.into();
@@ -2240,6 +2834,9 @@ fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
                 }
             }
         }
+    }
+    if !also.is_empty() {
+        t.lines.push((s.t_also_for.into(), also.join(", ")));
     }
     if let Some(hl) = t.footer_height.take() {
         t.lines.push(hl);
@@ -2378,18 +2975,33 @@ fn draw_tooltip(r: &Renderer, s: &i18n::Strings, secs: &[TipSection], more: usiz
 }
 
 /// Search entries: the pack's quests (translated title, giver, already tracked?) then the index's items.
-fn search_entries(ix: Option<&model::SearchIndex>, pack: Option<&model::Pack>, tracker: Option<&model::Tracker>) -> Vec<search::Entry> {
+fn search_entries(ix: Option<&model::SearchIndex>, pack: Option<&model::Pack>, tracker: Option<&model::Tracker>, g: &quests::Graph, s: &i18n::Strings) -> Vec<search::Entry> {
     let mut out = vec![];
     if let Some(p) = pack {
+        let me = tracker.map(progress::me_progress).unwrap_or_default();
         for (qid, q) in &p.quests {
-            let tracked = tracker.map(|t| t.tracked.iter().any(|tq| tq.quest_id == *qid)).unwrap_or(false);
+            let st = g.state(&me, qid);
+            // State line: done / tracked / available / locked (how many quests before it, or its gate if repeatable).
+            let line = match st {
+                quests::State::Done => s.s_done.to_string(),
+                quests::State::Tracked => s.s_tracked.to_string(),
+                quests::State::Available => s.s_available.split(" · ").next().unwrap_or("").to_string(),
+                quests::State::Locked if g.is_repeatable(qid) => {
+                    let gate = g.requires(qid).first().and_then(|b| p.quests.get(b)).map(|b| b.title.clone()).unwrap_or_default();
+                    s.s_locked_rep.replace("{quest}", &gate)
+                }
+                quests::State::Locked => {
+                    let n = g.ancestors(qid).iter().filter(|a| !me.done.contains(*a) && !g.is_repeatable(a)).count();
+                    s.s_locked_n.replace("{n}", &n.to_string())
+                }
+            };
             out.push(search::Entry {
                 key: format!("quest:{qid}"),
                 name: q.title.clone(),
                 rarity: None,
                 n: 0,
                 sources: vec![],
-                quest: Some((q.giver.clone().unwrap_or_default(), tracked)),
+                quest: Some((q.giver.clone().unwrap_or_default(), line, st == quests::State::Tracked)),
             });
         }
     }
@@ -2416,6 +3028,21 @@ unsafe extern "system" fn find_game(h: HWND, lp: LPARAM) -> windows::Win32::Foun
 }
 
 /// Access to the open search window (from its window procedure).
+pub fn with_journal<R>(f: impl FnOnce(&mut journal::Journal) -> R) -> Option<R> {
+    with_app(|a| a.journal.as_mut().map(f)).flatten()
+}
+
+/// A command from the journal window.
+pub fn on_journal_cmd(c: journal::Cmd) {
+    with_app(|a| a.journal_cmd(c));
+}
+
+/// The journal window was closed.
+pub fn on_journal_close() {
+    with_app(|a| a.close_journal());
+}
+
+/// Runs `f` on the open search window, if any.
 pub fn with_search<R>(f: impl FnOnce(&mut search::Search) -> R) -> Option<R> {
     with_app(|a| a.search.as_mut().map(f)).flatten()
 }
@@ -2505,6 +3132,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             with_app(|a| {
                 a.dirty = true;
                 a.sync_data();
+                a.refresh_journal();
             });
             LRESULT(0)
         }
@@ -2536,6 +3164,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 }
                 tray::ID_SEARCH => {
                     with_app(|a| a.open_search());
+                }
+                tray::ID_JOURNAL => {
+                    with_app(|a| a.open_journal(None));
                 }
                 tray::ID_REFRESH => {
                     with_app(|a| {
@@ -2837,7 +3468,13 @@ fn main() {
             spot_start: Instant::now(),
             panel_scroll: 0.0,
             toast: None,
-            last_track: None,
+            last_record: None,
+            graph: Default::default(),
+            graph_pack: String::new(),
+            history: progress::History::load(),
+            locals: progress::LocalAllies::load(),
+            journal: None,
+            journal_tab: progress::ME.into(),
             recent_track: None,
             avail_open: false,
             other_open: vec![],
@@ -2854,6 +3491,10 @@ fn main() {
         if updated {
             let t = format!("{} {}.", s.updated_to, env!("CARGO_PKG_VERSION"));
             tray::balloon(main, "Hunger Overlay", &t);
+        }
+        // `--journal`: open the quest journal at startup (for a desktop shortcut).
+        if std::env::args().any(|a| a == "--journal") {
+            with_app(|a| a.open_journal(None));
         }
         if no_key {
             with_app(|a| a.open_settings());
@@ -2979,7 +3620,14 @@ mod preview {
                 spot_start: now,
                 panel_scroll: 0.0,
                 toast: None,
-                last_track: None,
+                last_record: None,
+                graph: Default::default(),
+                graph_pack: String::new(),
+                history: Default::default(),
+                // Read-only: the preview shows the local allies of this PC (tests never write files).
+                locals: progress::LocalAllies::load(),
+                journal: None,
+                journal_tab: progress::ME.into(),
                 recent_track: None,
                 avail_open: false,
                 other_open: vec![],

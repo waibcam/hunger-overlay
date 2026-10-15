@@ -57,6 +57,13 @@ pub enum Req {
     FetchItem(String),
     /// Track / untrack a quest (write: POST /me/track).
     Track { quest_id: String, tracked: bool },
+    /// Set the state of several quests at once, atomically (write: POST /me/quests, contract v1.2):
+    /// (quest id, "done" | "tracked" | "none"), based on the tracker revision `base_rev`.
+    SetQuests { changes: Vec<(String, &'static str)>, base_rev: Option<String> },
+    /// Fetch the hub list of possible raid allies (GET /me/allies; only when the user opens "+ Ally").
+    FetchHub,
+    /// Save the chosen raid allies on the website (PUT /me/allies, at most 2 user ids).
+    SetAllies(Vec<String>),
     /// Check whether a new version exists; `install` = download it (and verify it) so it can be installed.
     CheckUpdate { install: bool },
 }
@@ -74,8 +81,10 @@ pub struct Shared {
     pub search_index: Option<SearchIndex>,
     /// Loaded files of searched items, by item key (ID_…).
     pub search_items: std::collections::HashMap<String, ItemFile>,
-    /// Message to show the user after a refused write ("unsupported" | "readonly" | "failed").
+    /// Message to show the user after a refused write ("unsupported" | "readonly" | "failed" | "conflict").
     pub notice: Option<&'static str>,
+    /// Hub list of possible raid allies (None = not fetched yet; Some(Err) = failed).
+    pub hub: Option<Result<Vec<crate::model::HubEntry>, &'static str>>,
     /// Current connection state (None = nothing attempted yet).
     pub status: Option<Status>,
     /// Incremented on every data change (the UI redraws).
@@ -259,6 +268,9 @@ impl Worker {
                 Req::FetchIndex => self.fetch_index(),
                 Req::FetchItem(key) => self.fetch_item(&key),
                 Req::Track { quest_id, tracked } => self.track(&quest_id, tracked),
+                Req::SetQuests { changes, base_rev } => self.set_quests(&changes, base_rev.as_deref()),
+                Req::FetchHub => self.fetch_hub(),
+                Req::SetAllies(ids) => self.set_allies(&ids),
             }
         }
     }
@@ -515,6 +527,138 @@ impl Worker {
         };
         if let Some(n) = notice {
             logf!("tracking refused: {n}");
+            self.shared.lock().unwrap().notice = Some(n);
+        }
+        (self.notify)();
+    }
+
+    /// Sets the state of several quests in one atomic write (contract v1.2):
+    /// `POST {base}/api/overlay/v1/me/quests` with `Authorization: Bearer <key>` and
+    /// `{"changes": [{"quest_id", "state"}], "base_rev"}`. Only quest ids and states are sent, on an explicit user
+    /// action. The website answers with the new tracker. 409 = the progression changed elsewhere meanwhile: the
+    /// tracker is re-read and nothing is written. Counts toward `MAX_PER_HOUR`.
+    fn set_quests(&mut self, changes: &[(String, &'static str)], base_rev: Option<&str>) {
+        let Some(key) = self.key.clone() else { return };
+        if changes.is_empty() || !self.allowed(true) {
+            return;
+        }
+        self.history.push(Instant::now());
+        let url = format!("{}/api/overlay/v1/me/quests", self.base);
+        let body = serde_json::json!({
+            "changes": changes.iter().map(|(q, s)| serde_json::json!({"quest_id": q, "state": s})).collect::<Vec<_>>(),
+            "base_rev": base_rev,
+        })
+        .to_string();
+        let notice = match self.agent.post(&url).set("Authorization", &format!("Bearer {key}")).set("Content-Type", "application/json").send_string(&body) {
+            Ok(resp) => {
+                let etag = resp.header("ETag").map(|e| e.trim().to_string());
+                let text = resp.into_string().unwrap_or_default();
+                match serde_json::from_str::<Tracker>(&text) {
+                    Ok(t) => {
+                        logf!("quests: {} change(s) written", changes.len());
+                        let _ = std::fs::write(Self::cache("tracker.json"), &text);
+                        self.etags.tracker = etag.or_else(|| t.rev.as_ref().map(|r| format!("\"{r}\"")));
+                        self.save_etags();
+                        let mut s = self.shared.lock().unwrap();
+                        s.tracker = Some(t);
+                        s.version += 1;
+                        None
+                    }
+                    Err(_) => {
+                        self.etags.tracker = None;
+                        self.refresh(true);
+                        None
+                    }
+                }
+            }
+            Err(ureq::Error::Status(503, _)) => {
+                // Another write of the same account is in progress ("busy", Retry-After: 2): re-read the state.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                self.etags.tracker = None;
+                self.refresh(true);
+                Some("failed")
+            }
+            Err(ureq::Error::Status(409, _)) => {
+                // Changed elsewhere (website, other device): re-read; the user retries on the fresh state.
+                self.etags.tracker = None;
+                self.refresh(true);
+                Some("conflict")
+            }
+            Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(405, _)) => Some("unsupported"),
+            Err(ureq::Error::Status(403, _)) => Some("readonly"),
+            Err(e) => {
+                logf!("quests: {}", err_kind(&e));
+                Some("failed")
+            }
+        };
+        if let Some(n) = notice {
+            logf!("quests refused: {n}");
+            self.shared.lock().unwrap().notice = Some(n);
+        }
+        (self.notify)();
+    }
+
+    /// Hub list of possible raid allies: `GET {base}/api/overlay/v1/me/allies` with the Bearer key. Only names,
+    /// ids and relations come back; called only when the user opens the "+ Ally" tab.
+    fn fetch_hub(&mut self) {
+        let Some(key) = self.key.clone() else { return };
+        if !self.allowed(true) {
+            return;
+        }
+        self.history.push(Instant::now());
+        let url = format!("{}/api/overlay/v1/me/allies", self.base);
+        let res = match self.agent.get(&url).set("Authorization", &format!("Bearer {key}")).call() {
+            Ok(resp) => {
+                let v: Option<serde_json::Value> = resp.into_string().ok().and_then(|b| serde_json::from_str(&b).ok());
+                v.and_then(|v| serde_json::from_value::<Vec<crate::model::HubEntry>>(v["allies"].clone()).ok()).ok_or("failed")
+            }
+            Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(405, _)) => Err("unsupported"),
+            Err(e) => {
+                logf!("hub: {}", err_kind(&e));
+                Err("failed")
+            }
+        };
+        self.shared.lock().unwrap().hub = Some(res);
+        (self.notify)();
+    }
+
+    /// Saves the chosen raid allies on the website: `PUT {base}/api/overlay/v1/me/allies` with
+    /// `{"user_ids": [...]}` (at most 2 ids). The website answers with the tracker, which then carries `allies[]`.
+    fn set_allies(&mut self, ids: &[String]) {
+        let Some(key) = self.key.clone() else { return };
+        if !self.allowed(true) {
+            return;
+        }
+        self.history.push(Instant::now());
+        let url = format!("{}/api/overlay/v1/me/allies", self.base);
+        let body = serde_json::json!({ "user_ids": ids.iter().take(2).collect::<Vec<_>>() }).to_string();
+        let notice = match self.agent.put(&url).set("Authorization", &format!("Bearer {key}")).set("Content-Type", "application/json").send_string(&body) {
+            Ok(resp) => {
+                let text = resp.into_string().unwrap_or_default();
+                match serde_json::from_str::<Tracker>(&text) {
+                    Ok(t) => {
+                        let _ = std::fs::write(Self::cache("tracker.json"), &text);
+                        self.etags.tracker = t.rev.as_ref().map(|r| format!("\"{r}\""));
+                        self.save_etags();
+                        let mut s = self.shared.lock().unwrap();
+                        s.tracker = Some(t);
+                        s.version += 1;
+                    }
+                    Err(_) => {
+                        self.etags.tracker = None;
+                        self.refresh(true);
+                    }
+                }
+                None
+            }
+            Err(ureq::Error::Status(404, _)) | Err(ureq::Error::Status(405, _)) => Some("unsupported"),
+            Err(ureq::Error::Status(403, _)) => Some("readonly"),
+            Err(e) => {
+                logf!("allies: {}", err_kind(&e));
+                Some("failed")
+            }
+        };
+        if let Some(n) = notice {
             self.shared.lock().unwrap().notice = Some(n);
         }
         (self.notify)();

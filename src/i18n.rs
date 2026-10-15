@@ -190,6 +190,196 @@ pub struct Strings {
     pub h_upper: &'static str,
     /// Spot more than 8 m above the ground.
     pub h_high: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub menu_journal: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_title: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_you: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_add_ally: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_synced: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_filter: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_repeatables: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_up_next: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_up_next: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_up_next_hint: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_up_next_hint: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_in_progress: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_waiting: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_all_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_track: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_untrack: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_already_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_reopen: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_finished: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_track_here: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_done_up_to: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_fix: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_characters: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_click_step: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_n_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_step: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_cascade_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_cascade_up: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_cascade_reopen: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_cascade_untrack: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_undo_note: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_after: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_line_starts: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_side_step: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_repeat_sum: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_repeat_avail: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_no_order: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_inconsistent: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_last_change: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_history: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_undo_to: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_conflict: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_undo_anyway: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_keep: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_ally_site_note: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub j_ally_local_note: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_hide_map: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_remove_ally: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub a_rename: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_title: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_count: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_help: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_hub: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_friend: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_follower: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_following: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_n_quests: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_add: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_added: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_full: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_manual: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_name: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub al_manual_help: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_journal: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_sec_allies: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_manage: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_add: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub tag_site: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub tag_local: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_also: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_allies_empty: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_ally_quests: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub p_repeat_link: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_done_n: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_next: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_finished: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_reopened: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_undone_change: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub toast_write_failed: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_available: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_locked_n: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_locked_rep: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_done: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_tracked: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub s_open_journal: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub k_ally: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub t_quest: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub t_also_for: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub t_added_by_you: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub t_local_ally: &'static str,
+    /// Quest journal / allies (docs/DESIGN_QUESTS.md §7).
+    pub t_avail_you: &'static str,
+    /// Toast: the website does not support this change yet.
+    pub toast_needs_site: &'static str,
+    /// Toast: the progression changed on the website meanwhile (409).
+    pub toast_conflict: &'static str,
 }
 
 /// French UI texts.
@@ -296,7 +486,7 @@ pub static FR: Strings = Strings {
     p_empty_hint: "Suivez des quêtes sur hunger-companion.com, ou activez le calque Quêtes pour les découvrir sur cette carte.",
     p_empty_btn: "Afficher les quêtes de cette carte",
     p_relocating: "Recalage de la carte… repères masqués",
-    p_summary: "{q} quêtes · {l} calques",
+    p_summary: "{q} quêtes · {a} alliés · {l} calques",
     p_scroll: "Suite plus bas · molette",
     p_sec_quests: "QUÊTES",
     p_sec_crafting: "ARTISANAT",
@@ -326,6 +516,101 @@ pub static FR: Strings = Strings {
     h_ground: "au sol",
     h_upper: "à l'étage",
     h_high: "en hauteur (tour, toit)",
+    menu_journal: "Journal de quêtes…",
+    j_title: "Journal de quêtes",
+    j_you: "vous",
+    j_add_ally: "Allié",
+    j_synced: "synchronisé",
+    j_filter: "Filtrer les quêtes…",
+    j_repeatables: "Répétables",
+    j_up_next: "À SUIVRE",
+    p_up_next: "À SUIVRE",
+    j_up_next_hint: "première quête à faire pour chaque personnage",
+    p_up_next_hint: "la première par personnage",
+    j_in_progress: "en cours",
+    j_waiting: "en attente · requiert {giver} · {quest}",
+    j_all_done: "Tout est fait",
+    a_track: "Suivre",
+    a_untrack: "Ne plus suivre",
+    a_done: "Faite",
+    a_already_done: "Déjà faite",
+    a_reopen: "Rouvrir",
+    a_finished: "Terminée",
+    a_track_here: "Suivre ici",
+    a_done_up_to: "Faites jusqu'ici",
+    a_fix: "Corriger",
+    j_characters: "PERSONNAGES",
+    j_click_step: "cliquez une étape : « J'en suis là »",
+    j_n_done: "{n} / {t} faites",
+    j_step: "{giver} · étape {n} sur {t}",
+    j_cascade_done: "« J'en suis là » marque aussi {n} quêtes précédentes comme faites :",
+    j_cascade_up: "Marque aussi {n} quêtes précédentes comme faites :",
+    j_cascade_reopen: "Rouvre aussi {n} quêtes suivantes :",
+    j_cascade_untrack: "et arrête de suivre :",
+    j_undo_note: "Annulable à tout moment",
+    j_after: "après {quest}",
+    j_line_starts: "La ligne {n} commence après {giver} · {quest}",
+    j_side_step: "étape annexe · requiert {giver} · {quest}",
+    j_repeat_sum: "Répétables : {d} quotidiennes · {w} hebdomadaires · {m} mensuelles",
+    j_repeat_avail: "{n} quêtes répétables disponibles",
+    j_no_order: "Ordre inconnu",
+    j_inconsistent: "Quêtes précédentes non marquées faites",
+    j_last_change: "Dernière modification :",
+    j_history: "Historique",
+    j_undo_to: "Annuler jusqu'ici",
+    j_conflict: "Modifié sur le site depuis : {list}.",
+    j_undo_anyway: "Annuler quand même",
+    j_keep: "Conserver",
+    j_ally_site_note: "{name} met ses quêtes à jour sur hunger-companion.com",
+    j_ally_local_note: "Conservé sur ce PC uniquement, pas sur le site",
+    a_hide_map: "Masquer sur la carte",
+    a_remove_ally: "Retirer du raid",
+    a_rename: "Renommer",
+    al_title: "ALLIÉS DU RAID",
+    al_count: "{n} sur 2",
+    al_help: "Leurs quêtes apparaissent en creux sur votre carte, avec leur initiale.",
+    al_hub: "Depuis votre hub sur hunger-companion.com",
+    al_friend: "Ami",
+    al_follower: "Vous suit",
+    al_following: "Vous suivez",
+    al_n_quests: "{n} quêtes",
+    al_add: "Ajouter",
+    al_added: "Ajouté",
+    al_full: "Retirez-en un d'abord",
+    al_manual: "Quelqu'un sans l'appli ni compte",
+    al_name: "Nom",
+    al_manual_help: "Conservé sur ce PC uniquement. Choisissez ses quêtes dans son onglet.",
+    p_journal: "Journal",
+    p_sec_allies: "ALLIÉS",
+    p_manage: "Gérer",
+    p_add: "Ajouter",
+    tag_site: "SITE",
+    tag_local: "LOCAL",
+    p_also: "aussi",
+    p_allies_empty: "Personne pour l'instant. Choisissez un coéquipier dans votre hub, ou ajoutez quelqu'un qui n'a pas l'appli.",
+    p_ally_quests: "{n} quêtes : {list}",
+    p_repeat_link: "{n} répétables · Journal",
+    toast_done: "{quest} faite",
+    toast_done_n: "{quest} faite (+{n} précédentes)",
+    toast_next: "Ensuite :",
+    toast_finished: "{quest} terminée",
+    toast_reopened: "{quest} rouverte",
+    toast_undone_change: "Annulé : {label}",
+    toast_write_failed: "Enregistrement sur le site impossible (hors ligne)",
+    s_available: "Disponible · {n} points ici",
+    s_locked_n: "Verrouillée · {n} avant",
+    s_locked_rep: "Verrouillée · répétable, après {quest}",
+    s_done: "Faite",
+    s_tracked: "Suivie",
+    s_open_journal: "Ouvrir dans le journal",
+    k_ally: "ALLIÉ",
+    t_quest: "Quête",
+    t_also_for: "Aussi pour",
+    t_added_by_you: "Ajouté par vous",
+    t_local_ally: "allié local",
+    t_avail_you: "Disponible pour vous aussi",
+    toast_needs_site: "Le site ne gère pas encore cette action (mise à jour en cours).",
+    toast_conflict: "Votre progression a changé sur le site entre-temps : vérifiez et recommencez.",
 };
 
 /// English UI texts (used for every language other than French).
@@ -432,7 +717,7 @@ pub static EN: Strings = Strings {
     p_empty_hint: "Track quests on hunger-companion.com, or turn on the Quests layer to discover them on this map.",
     p_empty_btn: "Show quests on this map",
     p_relocating: "Re-locating the map… markers hidden",
-    p_summary: "{q} quests · {l} layers",
+    p_summary: "{q} quests · {a} allies · {l} layers",
     p_scroll: "More below · scroll",
     p_sec_quests: "QUESTS",
     p_sec_crafting: "CRAFTING",
@@ -462,6 +747,101 @@ pub static EN: Strings = Strings {
     h_ground: "ground level",
     h_upper: "upstairs",
     h_high: "high up (tower, roof)",
+    menu_journal: "Quest journal…",
+    j_title: "Quest journal",
+    j_you: "you",
+    j_add_ally: "Ally",
+    j_synced: "synced",
+    j_filter: "Filter quests…",
+    j_repeatables: "Repeatables",
+    j_up_next: "UP NEXT",
+    p_up_next: "UP NEXT",
+    j_up_next_hint: "first quest to do for each character",
+    p_up_next_hint: "first per character",
+    j_in_progress: "in progress",
+    j_waiting: "waiting · needs {giver} · {quest}",
+    j_all_done: "All done",
+    a_track: "Track",
+    a_untrack: "Untrack",
+    a_done: "Done",
+    a_already_done: "Already done",
+    a_reopen: "Reopen",
+    a_finished: "Finished",
+    a_track_here: "Track here",
+    a_done_up_to: "Done up to here",
+    a_fix: "Fix",
+    j_characters: "CHARACTERS",
+    j_click_step: "click a step: \"I am here\"",
+    j_n_done: "{n} / {t} done",
+    j_step: "{giver} · step {n} of {t}",
+    j_cascade_done: "\"I am here\" also marks {n} earlier quests done:",
+    j_cascade_up: "Also marks {n} earlier quests done:",
+    j_cascade_reopen: "Also reopens {n} later quests:",
+    j_cascade_untrack: "and stops tracking:",
+    j_undo_note: "Undo stays available",
+    j_after: "after {quest}",
+    j_line_starts: "Line {n} starts after {giver} · {quest}",
+    j_side_step: "side step · needs {giver} · {quest}",
+    j_repeat_sum: "Repeatable: {d} daily · {w} weekly · {m} monthly",
+    j_repeat_avail: "{n} repeatable quests available",
+    j_no_order: "No known order",
+    j_inconsistent: "Earlier quests not marked done",
+    j_last_change: "Last change:",
+    j_history: "History",
+    j_undo_to: "Undo back to here",
+    j_conflict: "Changed on the website since: {list}.",
+    j_undo_anyway: "Undo anyway",
+    j_keep: "Keep",
+    j_ally_site_note: "{name} updates their quests on hunger-companion.com",
+    j_ally_local_note: "Kept on this PC only, not on the website",
+    a_hide_map: "Hide on map",
+    a_remove_ally: "Remove from raid",
+    a_rename: "Rename",
+    al_title: "RAID ALLIES",
+    al_count: "{n} of 2",
+    al_help: "Their quests show hollow on your map, with their initial.",
+    al_hub: "From your hub on hunger-companion.com",
+    al_friend: "Friend",
+    al_follower: "Follows you",
+    al_following: "You follow",
+    al_n_quests: "{n} quests",
+    al_add: "Add",
+    al_added: "Added",
+    al_full: "Remove one first",
+    al_manual: "Someone without the app or an account",
+    al_name: "Name",
+    al_manual_help: "Kept on this PC only. Pick their quests in their tab.",
+    p_journal: "Journal",
+    p_sec_allies: "ALLIES",
+    p_manage: "Manage",
+    p_add: "Add",
+    tag_site: "SITE",
+    tag_local: "LOCAL",
+    p_also: "also",
+    p_allies_empty: "Nobody yet. Pick a raid mate from your hub, or add someone who has no app.",
+    p_ally_quests: "{n} quests: {list}",
+    p_repeat_link: "{n} repeatable · Journal",
+    toast_done: "{quest} done",
+    toast_done_n: "{quest} done (+{n} earlier)",
+    toast_next: "Next:",
+    toast_finished: "{quest} finished",
+    toast_reopened: "{quest} reopened",
+    toast_undone_change: "Undone: {label}",
+    toast_write_failed: "Couldn't save on the website (offline)",
+    s_available: "Available · {n} spots here",
+    s_locked_n: "Locked · {n} before",
+    s_locked_rep: "Locked · repeatable, after {quest}",
+    s_done: "Done",
+    s_tracked: "Tracked",
+    s_open_journal: "Open in journal",
+    k_ally: "ALLY",
+    t_quest: "Quest",
+    t_also_for: "Also for",
+    t_added_by_you: "Added by you",
+    t_local_ally: "local ally",
+    t_avail_you: "Available for you too",
+    toast_needs_site: "The website does not support this action yet (update in progress).",
+    toast_conflict: "Your progression changed on the website meanwhile: check and try again.",
 };
 
 /// Languages offered by the site (code, display name).

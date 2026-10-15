@@ -36,9 +36,18 @@ extractions and more appear exactly where they are, and they follow the map as y
 - **Discover quests on the map.** The Quests layer shows where the quests you do not track yet take place. Track one
   with its **+ Track** button in the panel, or with **Ctrl + click** on its marker (with an Undo link). This needs a
   key that is allowed to change your tracking.
+- **Quest journal.** Your progression per character, in the real play order, with the quests that depend on others:
+  - **Up next** shows the first quest to do for each character; "Already done" marks it done and proposes the next one;
+  - click a step to say "**I am here**": the earlier quests become done (shown before anything is saved);
+  - every change is written to your hunger-companion.com account in one go, and **Undo** (with a history) puts
+    everything back exactly as it was;
+  - the panel shows a ✓ on each tracked quest and suggests the next quest when you finish one.
+- **Raid allies** (up to 2, as raids hold 3 players): members of your hub on the website, or a friend without the app
+  or an account whose quests you enter yourself. Their quests show on your map as hollow markers with their initial,
+  and a small pip on your own marker when you share a spot for the same quest.
 - **Find an item.** Type a name (in your language) and every place to find it appears on the map.
-- **Find a quest.** Pick a quest in the same search window to start or stop tracking it on your account. This needs a
-  key that is allowed to change your tracking.
+- **Find a quest.** Pick a quest in the same search window: an available quest is tracked at once, a locked or done
+  one opens in the journal. Changing your progression needs a key that is allowed to change your tracking.
 - **Crafting list** (site beta). Recipes you want to craft appear like quests, with their ingredients' locations.
 - **Ten languages** for the game data. The interface is in English or French. "Auto" follows the Windows language
   (English when it is not offered), or you can pick one from a list.
@@ -61,7 +70,8 @@ extractions and more appear exactly where they are, and they follow the map as y
 4. Play in **borderless / windowed fullscreen** mode. Exclusive fullscreen hides every overlay.
 5. Open the map in game.
 
-The tray icon (next to the clock) gives access to the settings, item and quest search, a manual refresh, and Quit.
+The tray icon (next to the clock) gives access to the settings, the quest journal, item and quest search, a manual
+refresh, and Quit. `HungerOverlay.exe --journal` opens the journal at start (handy for a desktop shortcut).
 
 ## What it does, and what it doesn't
 
@@ -69,9 +79,9 @@ The tray icon (next to the clock) gives access to the settings, item and quest s
 |---|---|
 | **Reads** | Screen pixels of the game window (GDI `BitBlt`), only to recognise the map and its position. The mouse wheel and button events (Raw Input, passive): they are never blocked or modified. |
 | **Draws** | A transparent, click-through window above the game, plus a small panel that does not take focus. |
-| **Sends** | Your API key, in an `Authorization` header over HTTPS, to `hunger-companion.com` only. It is never sent in a URL and never written to the log. When you pick a quest to (un)track, its quest id is sent too. No screenshots, input or game data are ever sent. |
+| **Sends** | Your API key, in an `Authorization` header over HTTPS, to `hunger-companion.com` only. It is never sent in a URL and never written to the log. When you change your quest progression (track, done, undo…) or choose raid allies, the quest ids and states (or ally ids) are sent too, only on your click. No screenshots, input or game data are ever sent. |
 | **Downloads** | Static JSON packs (quests, map calibrations, layers), your tracker, the items you search for, and updates listed in the site's `app.json`. An update is refused if its SHA-256 does not match. |
-| **Stores** | `%APPDATA%\HungerOverlay\`: settings, a cache of the downloaded data, a short log. The API key is encrypted with Windows DPAPI. |
+| **Stores** | `%APPDATA%\HungerOverlay\`: settings, a cache of the downloaded data, the undo history (last 20 changes, 7 days), allies without an account, a short log. The API key is encrypted with Windows DPAPI. |
 | **Never** | Reads the game's memory or files, injects code, simulates keys or clicks, or runs anything with administrator rights. |
 
 Network usage is deliberately tiny:
@@ -112,10 +122,12 @@ cargo build --release          # → target/release/HungerOverlay.exe
 | `net.rs`, `model.rs` | Website API (contract v1.1) and data model |
 | `panel.rs`, `render.rs` | Map panel and Direct2D rendering |
 | `markers.rs`, `scene.rs` | Marker catalogue and per-frame decluttering (clusters, spread, dense layers) |
+| `quests.rs`, `progress.rs`, `journal.rs` | Quest prerequisites and cascades, undo history and allies, quest journal window |
 | `settings.rs`, `search.rs`, `tray.rs` | Settings window, search window, tray icon |
 | `update.rs`, `config.rs`, `i18n.rs`, `log.rs` | Updates, settings file, texts, log |
 
-The overlay design is documented in [`docs/DESIGN.md`](docs/DESIGN.md).
+The overlay design is documented in [`docs/DESIGN.md`](docs/DESIGN.md) and, for quest progression and allies,
+[`docs/DESIGN_QUESTS.md`](docs/DESIGN_QUESTS.md).
 
 ## License
 

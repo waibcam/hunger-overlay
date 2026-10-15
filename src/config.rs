@@ -64,6 +64,12 @@ pub struct Config {
     /// Badge slots of the tracked quests: slot i = badge i + 1, "" = free. A quest keeps its number while it is
     /// tracked, and a newly tracked quest takes the first free number (the website's list order can change).
     pub quest_slots: Vec<String>,
+    /// Raid allies in adding order ("u_…" website, "l_…" local): the order gives their slot and colour.
+    pub ally_order: Vec<String>,
+    /// Allies hidden on the map.
+    pub hidden_allies: Vec<String>,
+    /// Ally quests hidden on the map ("<ally key>|<quest id>").
+    pub hidden_ally_quests: Vec<String>,
 }
 
 impl Default for Config {
@@ -92,6 +98,9 @@ impl Default for Config {
             sections_collapsed: vec![],
             quests_layer_seen: false,
             quest_slots: vec![],
+            ally_order: vec![],
+            hidden_allies: vec![],
+            hidden_ally_quests: vec![],
         }
     }
 }

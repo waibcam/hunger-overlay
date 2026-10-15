@@ -165,6 +165,21 @@ pub struct PackQuest {
     /// Places related to the quest (not tied to a specific objective).
     #[serde(default)]
     pub places: Vec<Marker>,
+    /// Quest line it belongs to (contract v1.2), if any.
+    #[serde(default)]
+    pub line: Option<String>,
+    /// Position in its quest line (0 = first).
+    #[serde(default)]
+    pub line_pos: Option<u32>,
+    /// Direct prerequisites: quests that must be done before this one can start (contract v1.2).
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// The quest can be done again.
+    #[serde(default)]
+    pub repeatable: bool,
+    /// "story", "daily", "weekly" or "monthly" (contract v1.2), if the website sends it.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// The data pack downloaded from the website (`pack.json`): maps, quests and optional layers.
@@ -187,6 +202,9 @@ pub struct Pack {
     /// Toggleable layers of points.
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// Quest givers in the website's display order (contract v1.2).
+    #[serde(default)]
+    pub givers: Vec<String>,
 }
 
 /// A toggleable set of points (spawns, extractions, places, harvest, keys, traps…).
@@ -365,9 +383,12 @@ pub struct Tracker {
     /// Data version the tracker refers to.
     #[serde(default)]
     pub pack_version: String,
-    /// Revision tag, used for conditional requests.
+    /// Revision tag, used for conditional requests (covers the allies too).
     #[serde(default)]
     pub rev: Option<String>,
+    /// Revision of the player's own progression only (the `base_rev` of `POST /me/quests`, contract v1.2).
+    #[serde(default)]
+    pub progress_rev: Option<String>,
     /// Account language on the website (if the website sends it).
     #[serde(default)]
     pub locale: Option<String>,
@@ -377,9 +398,56 @@ pub struct Tracker {
     /// Crafting list (admin accounts, in trial).
     #[serde(default)]
     pub crafting: Vec<Craft>,
+    /// Every quest the player finished (contract v1.2; None = the website does not send it yet).
+    #[serde(default)]
+    pub completed: Option<Vec<String>>,
     /// Tracked quests.
     #[serde(default)]
     pub tracked: Vec<TrackedQuest>,
+    /// The raid allies chosen on the website (at most 2), with their progression (contract v1.2).
+    #[serde(default)]
+    pub allies: Vec<AllyTracker>,
+}
+
+/// A website ally's progression, delivered with the tracker (read-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllyTracker {
+    /// Website user id.
+    pub id: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Their tracked quests (same format as the player's).
+    #[serde(default)]
+    pub tracked: Vec<TrackedQuest>,
+    /// Their finished quests, if shared.
+    #[serde(default)]
+    pub completed: Option<Vec<String>>,
+}
+
+/// One person of the website hub, who can be picked as a raid ally (`GET /me/allies`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubEntry {
+    /// Website user id.
+    pub id: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// "hub" (a member of an active hub the player is in).
+    #[serde(default)]
+    pub relation: String,
+    /// Name of the hub they share with the player.
+    #[serde(default)]
+    pub hub: Option<String>,
+    /// Has a website account (false: "m_…" member, a snapshot published in the hub).
+    #[serde(default)]
+    pub has_account: Option<bool>,
+    /// Already chosen as a raid ally.
+    #[serde(default)]
+    pub selected: bool,
+    /// Number of quests they track, if given.
+    #[serde(default)]
+    pub n_tracked: Option<u32>,
 }
 
 /// Colour "#rrggbb" → (r,g,b) in 0..1. Fallback: light grey.
@@ -434,6 +502,11 @@ pub struct DrawPoint {
     pub extra: Vec<String>,
     /// Height above the ground, in metres (negative = underground), if known.
     pub height: Option<f64>,
+    /// Ally point: (index in `ViewOut::allies`, quest id).
+    pub ally: Option<(usize, String)>,
+    /// Allies (indexes in `ViewOut::allies`) who have the same quest at this very spot: drawn as small pips on
+    /// this marker instead of a marker of their own.
+    pub pips: Vec<usize>,
 }
 
 /// Harvest details of a point.
@@ -553,6 +626,50 @@ pub struct ViewOpts<'a> {
     pub quests_title: &'a str,
     /// Badge slots of the tracked quests (`Config::quest_slots`): order and numbers of the quest rows.
     pub slots: &'a [String],
+    /// Raid allies (at most 2), with their tracked quests.
+    pub allies: Vec<AllyIn>,
+    /// Quests the Quests layer may show (the ones the player can start); None = every untracked quest.
+    pub startable: Option<&'a std::collections::HashSet<String>>,
+}
+
+/// A raid ally given to `build_view`.
+#[derive(Debug, Clone)]
+pub struct AllyIn {
+    /// "u_…" (website) or "l_…" (local).
+    pub key: String,
+    /// Display name.
+    pub name: String,
+    /// Initial(s) drawn in their markers.
+    pub initial: String,
+    /// Fixed ally colour.
+    pub color: (f32, f32, f32),
+    /// From the website hub (true) or kept on this PC (false).
+    pub site: bool,
+    /// Hidden on the map.
+    pub hidden: bool,
+    /// Tracked quests: (quest id, objective keys already done, hidden on the map).
+    pub tracked: Vec<(String, Vec<String>, bool)>,
+}
+
+/// One ally row of the panel.
+#[derive(Debug, Clone)]
+pub struct AllyRow {
+    /// Ally key.
+    pub key: String,
+    /// Display name.
+    pub name: String,
+    /// Initial(s).
+    pub initial: String,
+    /// Fixed ally colour.
+    pub color: (f32, f32, f32),
+    /// From the website (true) or local (false).
+    pub site: bool,
+    /// Hidden on the map.
+    pub hidden: bool,
+    /// Markers on this map (all their quests).
+    pub spots: usize,
+    /// Their quests: (quest id, title, markers here, my badge when I track it too, hidden).
+    pub quests: Vec<(String, String, usize, Option<String>, bool)>,
 }
 
 /// Colours of searched items (distinct from the website's quest palette).
@@ -568,11 +685,13 @@ pub struct ViewOut {
     pub layers: Vec<LegendLayer>,
     /// Untracked quests with objectives on this map (sorted by giver, then title).
     pub available: Vec<AvailQuest>,
+    /// Raid allies.
+    pub allies: Vec<AllyRow>,
 }
 
 /// Builds the points and the legend of a map: tracked quests, crafting list, searched items, enabled layers.
 pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
-    let mut out = ViewOut { points: vec![], legend: vec![], layers: vec![], available: vec![] };
+    let mut out = ViewOut { points: vec![], legend: vec![], layers: vec![], available: vec![], allies: vec![] };
     let map_id = o.map_id;
     let Some(pm) = pack.maps.iter().find(|m| m.map_id == map_id) else {
         return out;
@@ -616,6 +735,8 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             quest_ref: None,
             extra: vec![],
             height: mk.height_m,
+            ally: None,
+            pips: vec![],
         }
     };
 
@@ -812,7 +933,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
     let mut here = 0;
     let mut qpoints = vec![];
     for (qid, pq) in &pack.quests {
-        if tracked.contains(qid.as_str()) {
+        if tracked.contains(qid.as_str()) || o.startable.map(|s| !s.contains(qid)).unwrap_or(false) {
             continue;
         }
         let mut spots = 0;
@@ -897,6 +1018,51 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         merged.push(p);
     }
     out.points = merged;
+
+    // 8. Raid allies: their open objectives, hollow and with their initial. A spot that is also one of mine for the
+    //    same quest becomes a pip on my marker instead of a second marker.
+    let mine: HashMap<(String, i64, i64), usize> = out
+        .points
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.layer.is_none() && p.quest != usize::MAX)
+        .filter_map(|(i, p)| out.legend.get(p.quest).map(|l| ((l.quest_id.clone(), (p.u * 8192.0).round() as i64, (p.v * 8192.0).round() as i64), i)))
+        .collect();
+    for (ai, a) in o.allies.iter().enumerate() {
+        let mut row = AllyRow { key: a.key.clone(), name: a.name.clone(), initial: a.initial.clone(), color: a.color, site: a.site, hidden: a.hidden, spots: 0, quests: vec![] };
+        for (qid, done_keys, q_hidden) in &a.tracked {
+            let Some(pq) = pack.quests.get(qid) else { continue };
+            let also = out.legend.iter().find(|l| l.quest_id == *qid).map(|l| l.badge.clone());
+            let mut here = 0;
+            let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+            for po in pq.objectives.iter().filter(|po| !done_keys.contains(&po.objective_key)) {
+                for mk in po.markers.iter().filter(|m| keep(m)) {
+                    let Some((u, v)) = to_uv(mk) else { continue };
+                    let key = ((u * 8192.0).round() as i64, (v * 8192.0).round() as i64);
+                    if !seen.insert(key) {
+                        continue; // same spot already listed for this ally and quest
+                    }
+                    here += 1;
+                    if a.hidden || *q_hidden {
+                        continue;
+                    }
+                    if let Some(&mi) = mine.get(&(qid.clone(), key.0, key.1)) {
+                        if !out.points[mi].pips.contains(&ai) {
+                            out.points[mi].pips.push(ai);
+                        }
+                        continue;
+                    }
+                    let mut p = point(mk, u, v, a.color, usize::MAX, None, false, false, &po.label);
+                    p.label = po.label.clone();
+                    p.ally = Some((ai, qid.clone()));
+                    out.points.push(p);
+                }
+            }
+            row.spots += here;
+            row.quests.push((qid.clone(), pq.title.clone(), here, also, *q_hidden));
+        }
+        out.allies.push(row);
+    }
     out
 }
 
@@ -915,7 +1081,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests", slots: &[] };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests", slots: &[], allies: vec![], startable: None };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();

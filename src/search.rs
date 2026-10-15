@@ -40,8 +40,8 @@ pub struct Entry {
     pub n: u32,
     /// Kinds of sources: "container", "harvest", "placed".
     pub sources: Vec<String>,
-    /// Quest: (giver, already tracked).
-    pub quest: Option<(String, bool)>,
+    /// Quest: (giver, state line such as "Available · 40 spots here" or "Locked · 2 before", tracked by the player).
+    pub quest: Option<(String, String, bool)>,
 }
 
 /// State of the open search window.
@@ -438,11 +438,11 @@ impl Search {
                     if ri == self.sel {
                         r.fill_rrect(pad - 6.0 * k, y, w - pad + 6.0 * k, y + rh, 5.0 * k, t.hover);
                     }
-                    if let Some((giver, tracked)) = &e.quest {
-                        // Quest: 📜, giver, and whether it is already tracked.
-                        let right = format!("{giver} · {}", if *tracked { s.quest_tracked } else { s.quest_track });
+                    if let Some((giver, state, tracked)) = &e.quest {
+                        // Quest: a ring (gold when tracked), giver and its state for the player.
+                        let right = format!("{giver} · {state}");
                         let (rw, _) = r.measure(&right, Font::Small, 280.0 * k);
-                        r.text("📜", Font::Text, pad, y + 9.0 * k, 18.0 * k, t.text);
+                        r.stroke_circle(pad + 7.0 * k, y + rh / 2.0, 5.5 * k, 1.6 * k, if *tracked { t.accent } else { t.sub }, false);
                         r.text(&e.name, Font::Text, pad + 20.0 * k, y + 9.0 * k, w - 2.0 * pad - rw - 32.0 * k, if *tracked { t.accent } else { t.text });
                         r.text(&right, Font::Small, w - pad - rw, y + 11.0 * k, rw + 2.0, t.sub);
                         rows.push((y, y + rh, i));

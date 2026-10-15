@@ -16,6 +16,8 @@ pub enum Owner {
     Legend(usize),
     /// A map layer, by index.
     Layer(usize),
+    /// A raid ally, by index (all their quests are clustered together).
+    Ally(usize),
 }
 
 /// What the panel is spotlighting (hovered row or pill): its markers stay bright, the others are dimmed.
@@ -27,6 +29,10 @@ pub enum Spot {
     Layer(usize),
     /// One untracked quest of the Quests layer, by quest id.
     Quest(String),
+    /// A raid ally, by index.
+    Ally(usize),
+    /// One quest of a raid ally: (ally index, quest id).
+    AllyQuest(usize, String),
 }
 
 /// One marker to draw.
@@ -55,12 +61,15 @@ impl Item {
         markers::radius(self.kind) * k * if self.members.len() > 1 { 1.15 } else { 1.0 }
     }
 
-    /// True if the spotlight is on this marker.
+    /// True if the spotlight is on this marker (for an ally, also my markers that carry their pip).
     pub fn lit(&self, spot: &Spot, points: &[DrawPoint]) -> bool {
         match (spot, self.owner) {
             (Spot::Owner(a), Owner::Legend(b)) => *a == b,
             (Spot::Layer(a), Owner::Layer(b)) => *a == b,
             (Spot::Quest(q), Owner::Layer(_)) => self.members.iter().any(|&i| points[i].quest_ref.as_ref().map(|r| &r.0 == q).unwrap_or(false)),
+            (Spot::Ally(a), Owner::Ally(b)) => *a == b,
+            (Spot::AllyQuest(a, q), Owner::Ally(b)) => *a == b && self.members.iter().any(|&i| points[i].ally.as_ref().map(|x| &x.1 == q).unwrap_or(false)),
+            (Spot::Ally(a), Owner::Legend(_)) => self.members.iter().any(|&i| points[i].pips.contains(a)),
             _ => false,
         }
     }
@@ -82,10 +91,22 @@ pub struct Input<'a> {
     pub sc: f32,
     /// Spotlighted owner, if any: its markers are never clustered.
     pub spot: Option<&'a Spot>,
+    /// Initial(s) of the raid allies, by index.
+    pub ally_initials: &'a [String],
 }
 
 /// Kind, owner, colour and badge of one point.
-fn classify(p: &DrawPoint, legend: &[LegendQuest], layers: &[LegendLayer], dust: &[bool]) -> Option<(Kind, Owner, Rgb, String)> {
+fn classify(p: &DrawPoint, legend: &[LegendQuest], layers: &[LegendLayer], dust: &[bool], initials: &[String]) -> Option<(Kind, Owner, Rgb, String)> {
+    if let Some((ai, _)) = &p.ally {
+        let kind = if p.harvest.is_some() {
+            Kind::AllyNode
+        } else if p.placed {
+            Kind::AllyPlaced
+        } else {
+            Kind::Ally
+        };
+        return Some((kind, Owner::Ally(*ai), p.color, initials.get(*ai).cloned().unwrap_or_default()));
+    }
     if let Some(li) = p.layer {
         let ly = layers.get(li)?;
         let mut kind = markers::kind_for_layer(&ly.id, ly.diamond);
@@ -139,12 +160,12 @@ pub fn build(i: &Input) -> Vec<Item> {
     // 1. Classify every visible point.
     let mut raw: Vec<(usize, f32, f32, Kind, Owner, Rgb, String)> = Vec::with_capacity(i.visible.len());
     for &(pi, x, y) in i.visible {
-        if let Some((k, o, c, b)) = classify(&i.points[pi], i.legend, i.layers, &dust) {
+        if let Some((k, o, c, b)) = classify(&i.points[pi], i.legend, i.layers, &dust, i.ally_initials) {
             raw.push((pi, x, y, k, o, c, b));
         }
     }
 
-    // 2. A layer marker within 8 px of a tracked marker is skipped (the tracked marker wins).
+    // 2. A layer marker within 8 px of a tracked marker (mine or an ally's) is skipped (the tracked marker wins).
     let tracked: Vec<(f32, f32)> = raw.iter().filter(|r| markers::is_owner(r.3) && r.3 != Kind::Done).map(|r| (r.1, r.2)).collect();
     let near = 8.0 * sc;
     raw.retain(|r| {
@@ -169,6 +190,7 @@ pub fn build(i: &Input) -> Vec<Item> {
         let spot_lit = match (i.spot, owner) {
             (Some(Spot::Owner(a)), Owner::Legend(b)) => *a == b,
             (Some(Spot::Layer(a)), Owner::Layer(b)) => *a == b,
+            (Some(Spot::Ally(a)), Owner::Ally(b)) | (Some(Spot::AllyQuest(a, _)), Owner::Ally(b)) => *a == b,
             (Some(Spot::Quest(q)), Owner::Layer(_)) => i.points[pi].quest_ref.as_ref().map(|r| &r.0 == q).unwrap_or(false),
             _ => false,
         };
@@ -224,6 +246,13 @@ pub fn build(i: &Input) -> Vec<Item> {
         if g.len() < 2 || owners.len() < 2 {
             continue;
         }
+        // Mine first (by badge order), then the allies (A1, A2).
+        let mut g = g;
+        g.sort_by_key(|&a| match items[a].owner {
+            Owner::Legend(q) => (0, q),
+            Owner::Ally(x) => (1, x),
+            Owner::Layer(l) => (2, l),
+        });
         let n = g.len() as f32;
         let cx = g.iter().map(|&a| items[a].x).sum::<f32>() / n;
         let cy = g.iter().map(|&a| items[a].y).sum::<f32>() / n;
@@ -272,6 +301,8 @@ mod tests {
             quest_ref: None,
             extra: vec![],
             height: None,
+            ally: None,
+            pips: vec![],
         }
     }
 
@@ -300,7 +331,7 @@ mod tests {
         let legend = vec![lq("1"), lq("2")];
         let layers = vec![LegendLayer { id: "traps".into(), title: "Traps".into(), color: (1.0, 0.5, 0.0), diamond: false, on: true, here: 1 }];
         let visible = vec![(0, 100.0, 100.0), (1, 110.0, 100.0), (2, 106.0, 101.0), (3, 104.0, 100.0)];
-        let items = build(&Input { visible: &visible, points: &points, legend: &legend, layers: &layers, zoom: 1.0, sc: 1.0, spot: None });
+        let items = build(&Input { visible: &visible, points: &points, legend: &legend, layers: &layers, zoom: 1.0, sc: 1.0, spot: None, ally_initials: &[] });
         assert_eq!(items.len(), 2, "{items:?}");
         assert!(items.iter().all(|it| it.anchor.is_some()));
         assert!(items.iter().any(|it| it.members.len() == 2));

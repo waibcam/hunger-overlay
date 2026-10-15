@@ -8,7 +8,7 @@
 
 use crate::i18n::Strings;
 use crate::markers;
-use crate::model::{AvailQuest, LegendLayer, LegendQuest, OwnerKind};
+use crate::model::{AllyRow, AvailQuest, LegendLayer, LegendQuest, OwnerKind};
 use crate::net::Status;
 use crate::render::{Font, Renderer, Rgba};
 
@@ -57,6 +57,18 @@ pub enum Action {
     ExpandOther(String),
     /// Revert the last tracking change (toast link).
     Undo,
+    /// Mark a tracked quest done (or finished, for a repeatable).
+    Done(String),
+    /// Open the quest journal.
+    Journal,
+    /// Open the quest journal on the "+ Ally" tab.
+    ManageAllies,
+    /// Hide / show every marker of a raid ally (ally key).
+    ToggleAlly(String),
+    /// Hide / show one quest of a raid ally (ally key, quest id).
+    ToggleAllyQuest(String, String),
+    /// Remove a quest from a local ally (ally key, quest id).
+    RemoveAllyQuest(String, String),
 }
 
 /// Clickable zone (coordinates local to the panel).
@@ -100,6 +112,21 @@ pub fn reveal_step(best: f64) -> u32 {
     CHANCE_STEPS.iter().rev().copied().find(|&s| s as f64 <= pct).unwrap_or(0)
 }
 
+/// One row of "Up next" in the panel: a quest the player can start now.
+#[derive(Debug, Clone)]
+pub struct UpRow {
+    /// Quest id.
+    pub quest_id: String,
+    /// Title.
+    pub title: String,
+    /// Quest giver.
+    pub giver: String,
+    /// Step in the giver's story ("2/10").
+    pub step: Option<(usize, usize)>,
+    /// Has objective spots on this map.
+    pub here: bool,
+}
+
 /// Transient message under the header, after a change made on the website account.
 #[derive(Debug, Clone)]
 pub struct Toast {
@@ -109,6 +136,8 @@ pub struct Toast {
     pub ok: bool,
     /// Offer "Undo".
     pub undo: bool,
+    /// Next quest to propose on a second line (quest id, title), with a "+ Track" button.
+    pub next: Option<(String, String)>,
 }
 
 /// Everything the panel displays, gathered by the caller for one layout/draw pass.
@@ -151,6 +180,14 @@ pub struct View<'a> {
     pub recent: Option<&'a str>,
     /// The map position is being recomputed (markers hidden).
     pub uncertain: bool,
+    /// "Up next": quests the player can start now (empty when the website does not publish prerequisites).
+    pub up_next: &'a [UpRow],
+    /// Number of repeatable quests the player can start.
+    pub repeat_avail: usize,
+    /// The website accepts "done" (contract v1.2): show the ✓ buttons.
+    pub can_done: bool,
+    /// Raid allies.
+    pub allies: &'a [AllyRow],
     /// Overflow level (0 = everything; 1…4 = more and more compact, see `layout`).
     pub compact: u8,
     /// Scroll offset of the body (px).
@@ -170,35 +207,38 @@ pub struct Out {
 }
 
 // Design tokens (§3.1).
-const INK950: (f32, f32, f32) = (0.067, 0.055, 0.039);
-const INK900: Rgba = (0.043, 0.035, 0.024, 0.75);
-const INK800: Rgba = (0.141, 0.114, 0.086, 0.95);
-const INK700: Rgba = (0.188, 0.153, 0.114, 1.0);
-const LINE_GOLD: (f32, f32, f32) = (0.784, 0.655, 0.396);
-const GOLD: Rgba = (0.831, 0.686, 0.416, 1.0);
-const GOLD_HI: Rgba = (0.922, 0.796, 0.545, 1.0);
-const ACCENT: Rgba = (0.851, 0.647, 0.290, 1.0);
-const DARK_INK: Rgba = (0.090, 0.071, 0.047, 1.0);
-const T100: Rgba = (0.945, 0.918, 0.859, 1.0);
-const T200: Rgba = (0.851, 0.820, 0.761, 1.0);
-const T300: Rgba = (0.702, 0.663, 0.584, 1.0);
-const T500: Rgba = (0.522, 0.486, 0.427, 1.0);
-const WARN: (f32, f32, f32) = (0.941, 0.635, 0.294);
-const WARN_TEXT: Rgba = (0.953, 0.765, 0.541, 1.0);
-const OK: (f32, f32, f32) = (0.525, 0.761, 0.494);
-const HOVER_ROW: Rgba = (1.0, 1.0, 1.0, 0.07);
+pub(crate) const INK950: (f32, f32, f32) = (0.067, 0.055, 0.039);
+pub(crate) const INK900: Rgba = (0.043, 0.035, 0.024, 0.75);
+pub(crate) const INK800: Rgba = (0.141, 0.114, 0.086, 0.95);
+pub(crate) const INK700: Rgba = (0.188, 0.153, 0.114, 1.0);
+pub(crate) const LINE_GOLD: (f32, f32, f32) = (0.784, 0.655, 0.396);
+pub(crate) const GOLD: Rgba = (0.831, 0.686, 0.416, 1.0);
+pub(crate) const GOLD_HI: Rgba = (0.922, 0.796, 0.545, 1.0);
+pub(crate) const ACCENT: Rgba = (0.851, 0.647, 0.290, 1.0);
+pub(crate) const DARK_INK: Rgba = (0.090, 0.071, 0.047, 1.0);
+pub(crate) const T100: Rgba = (0.945, 0.918, 0.859, 1.0);
+pub(crate) const T200: Rgba = (0.851, 0.820, 0.761, 1.0);
+pub(crate) const T300: Rgba = (0.702, 0.663, 0.584, 1.0);
+pub(crate) const T500: Rgba = (0.522, 0.486, 0.427, 1.0);
+pub(crate) const WARN: (f32, f32, f32) = (0.941, 0.635, 0.294);
+pub(crate) const WARN_TEXT: Rgba = (0.953, 0.765, 0.541, 1.0);
+pub(crate) const OK: (f32, f32, f32) = (0.525, 0.761, 0.494);
+pub(crate) const HOVER_ROW: Rgba = (1.0, 1.0, 1.0, 0.07);
 
 // Icons (Segoe Fluent Icons / MDL2 Assets code points).
-const IC_SETTINGS: &str = "\u{E713}";
-const IC_SEARCH: &str = "\u{E721}";
-const IC_DOWN: &str = "\u{E70D}";
-const IC_RIGHT: &str = "\u{E76C}";
-const IC_CLOSE: &str = "\u{E711}";
-const IC_GLOBE: &str = "\u{E774}";
-const IC_WARN: &str = "\u{E7BA}";
-const IC_CHECK: &str = "\u{E73E}";
-const IC_HIDDEN: &str = "\u{ED1A}";
-const IC_INFO: &str = "\u{E946}";
+pub(crate) const IC_SETTINGS: &str = "\u{E713}";
+pub(crate) const IC_SEARCH: &str = "\u{E721}";
+pub(crate) const IC_DOWN: &str = "\u{E70D}";
+pub(crate) const IC_RIGHT: &str = "\u{E76C}";
+pub(crate) const IC_CLOSE: &str = "\u{E711}";
+pub(crate) const IC_GLOBE: &str = "\u{E774}";
+pub(crate) const IC_WARN: &str = "\u{E7BA}";
+pub(crate) const IC_CHECK: &str = "\u{E73E}";
+pub(crate) const IC_HIDDEN: &str = "\u{ED1A}";
+pub(crate) const IC_INFO: &str = "\u{E946}";
+pub(crate) const IC_ADD_FRIEND: &str = "\u{E8FA}";
+pub(crate) const IC_CLOUD: &str = "\u{E753}";
+pub(crate) const IC_PC: &str = "\u{E7F8}";
 
 /// Layer groups of the MAP LAYERS section (§4.3). Layers not listed go to the last group.
 const GROUPS: [&[&str]; 3] = [
@@ -411,6 +451,20 @@ fn owner(c: &mut Ctx, v: &View, y: f32, q: &LegendQuest) -> f32 {
         c.push(bx, by, bx + bs, by + bs, Action::RemoveSearch(key));
         right = bx - 8.0 * sc;
     }
+    // ✓ = this quest is done (it never cascades: a tracked quest's earlier quests are already done).
+    if q.kind == OwnerKind::Quest && v.can_done && !q.hidden {
+        let bs = 22.0 * sc;
+        let bx = right - bs;
+        let by = y + (h - bs) / 2.0;
+        if c.draw {
+            let hov = c.hov();
+            c.r.fill_rrect(bx, by, bx + bs, by + bs, 5.0 * sc, if hov { INK700 } else { (0.0, 0.0, 0.0, 0.0) });
+            c.r.stroke_rrect(bx + 0.5, by + 0.5, bx + bs - 0.5, by + bs - 0.5, 5.0 * sc, 1.0, if hov { GOLD } else { (1.0, 1.0, 1.0, 0.10) });
+            c.r.text_center(IC_CHECK, Font::Icon, bx + bs / 2.0, by + bs / 2.0, if hov { GOLD_HI } else { T300 });
+        }
+        c.push(bx, by, bx + bs, by + bs, Action::Done(q.quest_id.clone()));
+        right = bx - 8.0 * sc;
+    }
     let done_n = q.objectives.iter().filter(|o| o.done).count();
     let hide_done = v.compact >= 2 && v.show_done;
     let count_t = if q.hidden {
@@ -526,6 +580,90 @@ fn owner(c: &mut Ctx, v: &View, y: f32, q: &LegendQuest) -> f32 {
     y + 4.0 * sc
 }
 
+/// One raid ally (hollow disc with the initial, name, SITE / LOCAL tag, spots) and their quests; returns the new y.
+fn ally_rows(c: &mut Ctx, v: &View, y: f32, a: &AllyRow) -> f32 {
+    let s = v.s;
+    let (sc, pad) = (c.sc, c.pad);
+    let mut y = y;
+    let h = 30.0 * sc;
+    let alpha = if a.hidden { 0.4 } else { 1.0 };
+    let count = s.p_spots.replace("{n}", &a.spots.to_string());
+    let (cw, _) = c.r.measure(&count, Font::Small, 200.0 * sc);
+    if c.draw {
+        if c.hov() {
+            c.r.fill_rrect(pad - 6.0 * sc, y, c.w - pad + 4.0 * sc, y + h, 6.0 * sc, HOVER_ROW);
+        }
+        markers::draw(c.r, markers::Kind::Ally, a.color, &a.initial, pad + 10.0 * sc, y + h / 2.0, sc, sc, alpha);
+        let (nw, _) = c.r.measure(&a.name, Font::Name, 200.0 * sc);
+        c.text_mid(&a.name, Font::Name, pad + 28.0 * sc, y, h, nw + 2.0, fade(T100, alpha));
+        // Source: icon (icon font) then the tag.
+        c.r.text_center(if a.site { IC_CLOUD } else { IC_PC }, Font::Icon, pad + 44.0 * sc + nw, y + h / 2.0, fade(T500, alpha));
+        let tag = if a.site { s.tag_site } else { s.tag_local };
+        c.text_mid(tag, Font::Caps, pad + 56.0 * sc + nw, y, h, 120.0 * sc, fade(T500, alpha));
+        if a.hidden {
+            c.r.text_center(IC_HIDDEN, Font::Icon, c.w - pad - 9.0 * sc, y + h / 2.0, fade(T500, 0.8));
+        } else {
+            c.text_mid(&count, Font::Small, c.w - pad - cw, y, h, cw + 2.0, T500);
+        }
+    }
+    c.push(pad - 6.0 * sc, y, c.w - pad + 4.0 * sc, y + h, Action::ToggleAlly(a.key.clone()));
+    y += h;
+    if a.hidden {
+        return y + 2.0 * sc;
+    }
+    // Their quests (folded into one line at overflow level 3).
+    if v.compact >= 3 && !a.quests.is_empty() {
+        let t = s.p_ally_quests.replace("{n}", &a.quests.len().to_string()).replace("{list}", &a.quests.iter().map(|q| q.1.clone()).collect::<Vec<_>>().join(", "));
+        c.text_mid(&t, Font::Small, pad + 28.0 * sc, y, 22.0 * sc, c.w - 2.0 * pad - 28.0 * sc, T500);
+        return y + 24.0 * sc;
+    }
+    for (qid, title, spots, also, q_hidden) in &a.quests {
+        let rh = 24.0 * sc;
+        let mut right = c.w - pad;
+        if !a.site {
+            let bs = 20.0 * sc;
+            let bx = right - bs;
+            let by = y + (rh - bs) / 2.0;
+            if c.draw {
+                if c.hov() {
+                    c.r.fill_rrect(bx, by, bx + bs, by + bs, 5.0 * sc, INK700);
+                }
+                c.r.text_center(IC_CLOSE, Font::Icon, bx + bs / 2.0, by + bs / 2.0, if c.hov() { GOLD_HI } else { T500 });
+            }
+            c.push(bx, by, bx + bs, by + bs, Action::RemoveAllyQuest(a.key.clone(), qid.clone()));
+            right = bx - 6.0 * sc;
+        }
+        let qa = if *q_hidden { 0.4 } else { 1.0 };
+        let cnt = s.p_spots.replace("{n}", &spots.to_string());
+        let (cw, _) = c.r.measure(&cnt, Font::Small, 200.0 * sc);
+        if c.draw {
+            if c.hov() {
+                c.r.fill_rrect(pad + 20.0 * sc, y, right + 2.0 * sc, y + rh, 5.0 * sc, HOVER_ROW);
+            }
+            c.r.stroke_circle(pad + 34.0 * sc, y + rh / 2.0, 4.2 * sc, 1.8 * sc, (a.color.0, a.color.1, a.color.2, qa), false);
+            let (tw, _) = c.r.measure(title, Font::Chip, right - cw - pad - 70.0 * sc);
+            c.text_mid(title, Font::Chip, pad + 46.0 * sc, y, rh, right - cw - pad - 70.0 * sc, fade(T200, qa));
+            if let Some(b) = also {
+                let ax = pad + 52.0 * sc + tw;
+                let (aw, _) = c.r.measure(s.p_also, Font::Small, 100.0 * sc);
+                c.text_mid(s.p_also, Font::Small, ax, y, rh, aw + 2.0, T500);
+                if !b.is_empty() {
+                    c.r.fill_circle(ax + aw + 10.0 * sc, y + rh / 2.0, 7.0 * sc, (0.8, 0.8, 0.8, 0.75));
+                    c.r.text_center(b, Font::Caps, ax + aw + 10.0 * sc, y + rh / 2.0 - 0.5, DARK_INK);
+                }
+            }
+            if *q_hidden {
+                c.r.text_center(IC_HIDDEN, Font::Icon, right - 9.0 * sc, y + rh / 2.0, fade(T500, 0.8));
+            } else {
+                c.text_mid(&cnt, Font::Small, right - cw, y, rh, cw + 2.0, T500);
+            }
+        }
+        c.push(pad + 20.0 * sc, y, right + 2.0 * sc, y + rh, Action::ToggleAllyQuest(a.key.clone(), qid.clone()));
+        y += rh;
+    }
+    y + 4.0 * sc
+}
+
 /// Lays out the panel; draws it if `draw` is true.
 ///
 /// The same function is used twice: once with `draw = false` to measure, then with `draw = true` to paint.
@@ -583,7 +721,15 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
         if v.collapsed {
             let quests = v.legend.iter().filter(|q| q.kind == OwnerKind::Quest).count();
             let layers = v.layers.iter().filter(|l| l.on).count();
-            let summary = key_problem.or(net_problem).map(|p| p.to_string()).unwrap_or_else(|| s.p_summary.replace("{q}", &quests.to_string()).replace("{l}", &layers.to_string()));
+            let summary = key_problem.or(net_problem).map(|p| p.to_string()).unwrap_or_else(|| {
+                let t = s.p_summary.replace("{q}", &quests.to_string()).replace("{a}", &v.allies.len().to_string()).replace("{l}", &layers.to_string());
+                // No allies: drop that part ("3 quests · 0 allies · 1 layer" → "3 quests · 1 layer").
+                if v.allies.is_empty() {
+                    t.split(" · ").filter(|p| !p.starts_with('0')).collect::<Vec<_>>().join(" · ")
+                } else {
+                    t
+                }
+            });
             let sx = dx + 10.0 * sc;
             c.text_mid(&summary, Font::Chip, sx, 2.0 * sc, hh, cx - sx - 6.0 * sc, if key_problem.is_some() { WARN_TEXT } else { T300 });
         }
@@ -615,11 +761,12 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     // 3. Toast: result of the last tracking change, with "Undo".
     if let Some(t) = v.toast {
         let th = 32.0 * sc;
+        let th2 = if t.next.is_some() { 26.0 * sc } else { 0.0 };
         let tint = if t.ok { OK } else { WARN };
         let undo_w = if t.undo { r.measure(s.toast_undo, Font::Chip, 200.0).0 + 16.0 * sc } else { 0.0 };
         if draw {
-            r.fill_rrect(pad, y, w - pad, y + th, 6.0 * sc, (tint.0, tint.1, tint.2, 0.13));
-            r.stroke_rrect(pad + 0.5, y + 0.5, w - pad - 0.5, y + th - 0.5, 6.0 * sc, 1.0, (tint.0, tint.1, tint.2, 0.45));
+            r.fill_rrect(pad, y, w - pad, y + th + th2, 6.0 * sc, (tint.0, tint.1, tint.2, 0.13));
+            r.stroke_rrect(pad + 0.5, y + 0.5, w - pad - 0.5, y + th + th2 - 0.5, 6.0 * sc, 1.0, (tint.0, tint.1, tint.2, 0.45));
             r.text_center(if t.ok { IC_CHECK } else { IC_WARN }, Font::Icon, pad + 15.0 * sc, y + th / 2.0, (tint.0, tint.1, tint.2, 1.0));
             c.text_mid(&t.text, Font::Chip, pad + 30.0 * sc, y, th, iw - 36.0 * sc - undo_w, T100);
         }
@@ -634,7 +781,20 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
             }
             c.push(ux, y, w - pad, y + th, Action::Undo);
         }
-        y += th + 8.0 * sc;
+        // Second line: the next quest of the same character, with "+ Track".
+        if let Some((qid, title)) = &t.next {
+            let ny = y + th - 6.0 * sc;
+            let (bw, _) = r.measure(s.p_track, Font::Chip, 200.0 * sc);
+            let bw = bw + 20.0 * sc;
+            let bh = 24.0 * sc;
+            let bx = w - pad - bw - 6.0 * sc;
+            if draw {
+                let lab = format!("{} {title}", s.toast_next);
+                c.text_mid(&lab, Font::Chip, pad + 30.0 * sc, ny, th2, bx - pad - 40.0 * sc, T200);
+            }
+            chip(&mut c, bx, ny + (th2 - bh) / 2.0, bh, None, s.p_track, Some(Action::Track(qid.clone())), Chip::Ghost);
+        }
+        y += th + th2 + 8.0 * sc;
     }
 
     // 4. Search field (opens the search window).
@@ -727,7 +887,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
     let quests: Vec<&LegendQuest> = v.legend.iter().filter(|q| q.kind == OwnerKind::Quest).collect();
     let quests_on = v.layers.iter().any(|l| l.id == "quests" && l.on);
     let open_q = !collapsed("quests");
-    y = section(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), None, !open_q);
+    y = section(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), Some((s.p_journal.to_string(), Some(Action::Journal))), !open_q);
     if open_q {
         // Quests with markers here (or hidden, or filtered out) are listed; the others share one line.
         let other = |q: &LegendQuest| !q.hidden && q.on_this_map == 0 && q.filtered == 0 && !v.other_open.contains(&q.quest_id);
@@ -781,20 +941,33 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 y += 30.0 * sc + 6.0 * sc;
             }
         }
-        // Untracked quests on this map (Quests layer ON).
-        if quests_on && !v.available.is_empty() {
+        // "Up next": quests the player can start now (the website's prerequisites). Without them, the untracked
+        // quests on this map (Quests layer ON), as before.
+        let rows: Vec<(String, String, String, bool)> = if !v.up_next.is_empty() {
+            v.up_next
+                .iter()
+                .map(|u| (u.quest_id.clone(), u.title.clone(), match u.step { Some((n, t)) => format!("{} · {n}/{t}", u.giver), None => u.giver.clone() }, u.here))
+                .collect()
+        } else if quests_on {
+            v.available.iter().map(|a| (a.quest_id.clone(), a.title.clone(), a.giver.clone(), true)).collect()
+        } else {
+            vec![]
+        };
+        let up = !v.up_next.is_empty();
+        if !rows.is_empty() {
             let sh = 22.0 * sc;
             y += 6.0 * sc;
-            let t = format!("{}  {}", s.p_avail, v.available.len());
-            let (hw, _) = r.measure(s.p_avail_hint, Font::Small, 300.0 * sc);
+            let t = format!("{}  {}", if up { s.p_up_next } else { s.p_avail }, rows.len());
+            let hint = if up { s.p_up_next_hint } else { s.p_avail_hint };
+            let (hw, _) = r.measure(hint, Font::Small, 300.0 * sc);
             if draw {
                 let (tw, th) = r.measure_spaced(&t, Font::Caps, iw - hw - 10.0 * sc, 1.2 * sc);
                 r.text_spaced(&t, Font::Caps, pad, y + (sh - th) / 2.0, tw + 4.0, 1.2 * sc, T500);
-                c.text_mid(s.p_avail_hint, Font::Small, w - pad - hw, y, sh, hw + 2.0, T500);
+                c.text_mid(hint, Font::Small, w - pad - hw, y, sh, hw + 2.0, T500);
             }
             y += sh;
             let limit = if v.avail_open { usize::MAX } else if v.compact >= 1 { 0 } else { 3 };
-            for a in v.available.iter().take(limit) {
+            for (qid, title, sub, here) in rows.iter().take(limit) {
                 let rh = 30.0 * sc;
                 let btn = s.p_track;
                 let (bw, _) = r.measure(btn, Font::Chip, 200.0 * sc);
@@ -802,23 +975,29 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 let bh = 24.0 * sc;
                 let bx = w - pad - bw;
                 // The button first: it wins over the row when clicked.
-                chip(&mut c, bx, y + (rh - bh) / 2.0, bh, None, btn, Some(Action::Track(a.quest_id.clone())), Chip::Ghost);
+                chip(&mut c, bx, y + (rh - bh) / 2.0, bh, None, btn, Some(Action::Track(qid.clone())), Chip::Ghost);
                 if draw {
                     if c.hov() {
                         r.fill_rrect(pad - 6.0 * sc, y, bx - 4.0 * sc, y + rh, 6.0 * sc, HOVER_ROW);
                     }
-                    markers::draw(r, markers::Kind::QuestAvail, markers::QUEST_AVAIL, "", pad + 9.0 * sc, y + rh / 2.0, 0.8 * sc, sc, 1.0);
-                    let (gw, _) = r.measure(&a.giver, Font::Small, 160.0 * sc);
+                    // "!" token when it has spots on this map, a hollow ring otherwise.
+                    if *here {
+                        markers::draw(r, markers::Kind::QuestAvail, markers::QUEST_AVAIL, "", pad + 9.0 * sc, y + rh / 2.0, 0.8 * sc, sc, 1.0);
+                    } else {
+                        let qa = markers::QUEST_AVAIL;
+                        r.stroke_circle(pad + 9.0 * sc, y + rh / 2.0, 5.0 * sc, 1.4 * sc, (qa.0, qa.1, qa.2, 0.8), false);
+                    }
+                    let (gw, _) = r.measure(sub, Font::Small, 160.0 * sc);
                     let tmax = bx - 8.0 * sc - (pad + 24.0 * sc) - gw - 8.0 * sc;
-                    let (tw, _) = r.measure(&a.title, Font::Chip, tmax.max(20.0));
-                    c.text_mid(&a.title, Font::Chip, pad + 24.0 * sc, y, rh, tmax.max(20.0), T200);
-                    c.text_mid(&a.giver, Font::Small, pad + 32.0 * sc + tw, y, rh, gw + 2.0, T500);
+                    let (tw, _) = r.measure(title, Font::Chip, tmax.max(20.0));
+                    c.text_mid(title, Font::Chip, pad + 24.0 * sc, y, rh, tmax.max(20.0), T200);
+                    c.text_mid(sub, Font::Small, pad + 32.0 * sc + tw, y, rh, gw + 2.0, T500);
                 }
-                c.push(pad - 6.0 * sc, y, bx - 4.0 * sc, y + rh, Action::AvailRow(a.quest_id.clone()));
+                c.push(pad - 6.0 * sc, y, bx - 4.0 * sc, y + rh, Action::AvailRow(qid.clone()));
                 y += rh;
             }
-            let hidden = v.available.len().saturating_sub(limit);
-            if hidden > 0 || (v.avail_open && v.available.len() > 3) {
+            let hidden = rows.len().saturating_sub(limit);
+            if hidden > 0 || (v.avail_open && rows.len() > 3) {
                 let rh = 24.0 * sc;
                 let t = if v.avail_open { format!("{} \u{2303}", s.p_less) } else { format!("{} \u{2304}", s.p_more.replace("{n}", &hidden.to_string())) };
                 let (tw, _) = r.measure(&t, Font::Small, 300.0 * sc);
@@ -829,7 +1008,42 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 y += rh;
             }
         }
+        // Repeatable quests available: a link to the journal.
+        if v.repeat_avail > 0 {
+            let rh = 24.0 * sc;
+            let t = s.p_repeat_link.replace("{n}", &v.repeat_avail.to_string());
+            let (tw, _) = r.measure(&t, Font::Small, 300.0 * sc);
+            if draw {
+                c.text_mid(&t, Font::Small, pad + 24.0 * sc, y, rh, tw + 2.0, if c.hov() { GOLD_HI } else { GOLD });
+            }
+            c.push(pad + 20.0 * sc, y, pad + 28.0 * sc + tw, y + rh, Action::Journal);
+            y += rh;
+        }
         y += 4.0 * sc;
+    }
+
+    // 6 bis. ALLIES (raid mates, at most 2).
+    {
+        c.hairline(y + 2.0 * sc);
+        let folded = collapsed("allies") || (v.compact >= 4 && !v.allies.is_empty());
+        let right = if v.allies.is_empty() { s.p_add.to_string() } else { s.p_manage.to_string() };
+        let right = if folded && !v.allies.is_empty() { (v.allies.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", "), None) } else { (right, Some(Action::ManageAllies)) };
+        y = section(&mut c, y, "allies", s.p_sec_allies, (!v.allies.is_empty()).then_some(v.allies.len()), Some(right), folded);
+        if !folded {
+            if v.allies.is_empty() {
+                let (_, h) = r.measure(s.p_allies_empty, Font::Small, iw - 30.0 * sc);
+                if draw {
+                    r.stroke_circle(pad + 9.0 * sc, y + 10.0 * sc, 8.0 * sc, 1.2 * sc, fade(T500, 0.7), false);
+                    r.text_center("+", Font::Chip, pad + 9.0 * sc, y + 9.0 * sc, T500);
+                    r.text(s.p_allies_empty, Font::Small, pad + 26.0 * sc, y + 2.0 * sc, iw - 30.0 * sc, T500);
+                }
+                y += h.max(20.0 * sc) + 8.0 * sc;
+            }
+            for a in v.allies {
+                y = ally_rows(&mut c, v, y, a);
+            }
+            y += 4.0 * sc;
+        }
     }
 
     // 7. CRAFTING and 8. SEARCH (only when they have rows).

@@ -62,6 +62,12 @@ pub enum Kind {
     Loot,
     /// Harvest node (layer): small square in the profession's colour.
     Node,
+    /// Raid ally's objective at a container or spot: hollow disc in the ally colour, white hairline ring, initial.
+    Ally,
+    /// Raid ally's harvest node: the same as a rounded square.
+    AllyNode,
+    /// Raid ally's placed object: the same as a diamond.
+    AllyPlaced,
     /// Layer the app does not know (added later by the website): small disc or diamond in the layer colour.
     Generic,
     /// Same, drawn as a diamond.
@@ -132,6 +138,9 @@ pub fn radius(k: Kind) -> f32 {
         Kind::Loot => 7.0,
         Kind::Node => 5.5,
         Kind::Generic | Kind::GenericDiamond => 6.0,
+        Kind::Ally => 9.0,
+        Kind::AllyNode => 8.0,
+        Kind::AllyPlaced => 10.5,
     }
 }
 
@@ -147,15 +156,22 @@ pub fn z(k: Kind) -> u8 {
         Kind::Place => 7,
         Kind::QuestAvail => 8,
         Kind::Done | Kind::Spawn | Kind::Extraction => 9,
-        Kind::TrackedNodeLocked => 10,
-        Kind::TrackedNode | Kind::TrackedPlaced => 11,
-        Kind::Tracked | Kind::TrackedOptional => 13,
+        // Allies under every marker of mine.
+        Kind::Ally | Kind::AllyNode | Kind::AllyPlaced => 10,
+        Kind::TrackedNodeLocked => 11,
+        Kind::TrackedNode | Kind::TrackedPlaced => 12,
+        Kind::Tracked | Kind::TrackedOptional => 14,
     }
 }
 
-/// True for the markers of a tracked owner (quest, recipe, search).
+/// True for the markers of a tracked owner (quest, recipe, search, or a raid ally's quest).
 pub fn is_owner(k: Kind) -> bool {
-    matches!(k, Kind::Tracked | Kind::TrackedOptional | Kind::TrackedNode | Kind::TrackedNodeLocked | Kind::TrackedPlaced | Kind::Done)
+    matches!(k, Kind::Tracked | Kind::TrackedOptional | Kind::TrackedNode | Kind::TrackedNodeLocked | Kind::TrackedPlaced | Kind::Done) || is_ally(k)
+}
+
+/// True for a raid ally's marker.
+pub fn is_ally(k: Kind) -> bool {
+    matches!(k, Kind::Ally | Kind::AllyNode | Kind::AllyPlaced)
 }
 
 /// Owner colour guard: a website colour too dark to show on the halo is lightened by 25 %.
@@ -305,6 +321,29 @@ pub fn draw(r: &Renderer, kind: Kind, color: Rgb, badge: &str, x: f32, y: f32, k
             r.fill_rrect(x - rad - h, y - rad - h, x + rad + h, y + rad + h, 2.4 * k, halo(0.75));
             r.fill_rrect(x - rad, y - rad, x + rad, y + rad, 1.8 * k, rgba(color, a));
         }
+        Kind::Ally => {
+            r.fill_circle(x, y, rad + 2.6 * k, halo(0.6));
+            r.fill_circle(x, y, rad, rgba(TOKEN_FILL, 0.94 * a));
+            r.stroke_circle(x, y, rad - 1.1 * k, 2.2 * k, rgba(color, a), false);
+            r.stroke_circle(x, y, rad + 0.3 * k, 1.1 * k, (1.0, 1.0, 1.0, 0.85 * a), false);
+            r.text_center(badge, Font::Badge, x, y - 0.5, rgba(color, a));
+        }
+        Kind::AllyNode => {
+            let h = 2.6 * k;
+            r.fill_rrect(x - rad - h, y - rad - h, x + rad + h, y + rad + h, 4.0 * k, halo(0.6));
+            r.fill_rrect(x - rad, y - rad, x + rad, y + rad, 3.0 * k, rgba(TOKEN_FILL, 0.94 * a));
+            let i = 1.1 * k;
+            r.stroke_rrect(x - rad + i, y - rad + i, x + rad - i, y + rad - i, 2.5 * k, 2.2 * k, rgba(color, a));
+            r.stroke_rrect(x - rad - 0.3 * k, y - rad - 0.3 * k, x + rad + 0.3 * k, y + rad + 0.3 * k, 3.2 * k, 1.1 * k, (1.0, 1.0, 1.0, 0.85 * a));
+            r.text_center(badge, Font::Badge, x, y - 0.5, rgba(color, a));
+        }
+        Kind::AllyPlaced => {
+            r.fill_diamond(x, y, rad + 3.2 * k, 2.0 * k, halo(0.6));
+            r.fill_diamond(x, y, rad, 1.5 * k, rgba(TOKEN_FILL, 0.94 * a));
+            r.stroke_diamond(x, y, rad - 1.5 * k, 2.2 * k, rgba(color, a));
+            r.stroke_diamond(x, y, rad + 0.4 * k, 1.1 * k, (1.0, 1.0, 1.0, 0.85 * a));
+            r.text_center(badge, Font::Badge, x, y - 0.5, rgba(color, a));
+        }
         Kind::Generic => {
             r.fill_circle(x, y, rad + 1.6 * k, halo(0.7));
             r.fill_circle(x, y, rad, rgba(color, a));
@@ -332,6 +371,20 @@ fn owner_center(r: &Renderer, fill: Rgb, badge: &str, x: f32, y: f32, rad: f32, 
         let ink = badge_ink(fill);
         r.text_center(badge, Font::Badge, x, y - 0.5, (ink.0, ink.1, ink.2, a));
     }
+}
+
+/// Ally pip on one of my markers (same spot, same quest): a small hollow disc with the ally's initial, at the
+/// top right of my marker (second ally at the top left). `owner_r` = radius of my marker.
+#[allow(clippy::too_many_arguments)]
+pub fn pip(r: &Renderer, x: f32, y: f32, owner_r: f32, slot: usize, color: Rgb, initial: &str, k: f32, alpha: f32) {
+    let ang = if slot == 0 { -std::f32::consts::FRAC_PI_4 } else { -3.0 * std::f32::consts::FRAC_PI_4 };
+    let d = owner_r + 1.5 * k;
+    let (px, py) = (x + d * ang.cos(), y + d * ang.sin());
+    let pr = 6.2 * k;
+    r.fill_circle(px, py, pr + 1.4 * k, rgba(HALO, 0.7 * alpha));
+    r.fill_circle(px, py, pr, rgba(TOKEN_FILL, 0.95 * alpha));
+    r.stroke_circle(px, py, pr - 0.8 * k, 1.6 * k, rgba(color, alpha), false);
+    r.text_center(initial, Font::Caps, px, py - 0.5, rgba(color, alpha));
 }
 
 /// Hover focus ring (§5.2): dark halo under a light gold ring, around a marker of radius `rad`.

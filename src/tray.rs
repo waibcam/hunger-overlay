@@ -22,6 +22,8 @@ pub const ID_UPDATE: usize = 103;
 pub const ID_QUIT: usize = 104;
 /// "Find an item" menu entry.
 pub const ID_SEARCH: usize = 105;
+/// Menu command: open the quest journal.
+pub const ID_JOURNAL: usize = 106;
 
 /// Copies `s` as UTF-16 into a fixed-size Win32 buffer, truncating if needed and always NUL-terminating.
 fn copy(dst: &mut [u16], s: &str) {
@@ -95,6 +97,7 @@ pub fn menu(hwnd: HWND, s: &crate::i18n::Strings, update: bool) {
             let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(w.as_ptr()));
         };
         item(ID_SETTINGS, s.menu_settings);
+        item(ID_JOURNAL, s.menu_journal);
         item(ID_SEARCH, s.search_title);
         item(ID_REFRESH, s.menu_refresh);
         if update {
