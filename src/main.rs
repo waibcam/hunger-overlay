@@ -2217,6 +2217,9 @@ impl App {
         let r = &self.renderer;
         let (mx0, my0) = m.project(0.0, 0.0);
         let (mx1, my1) = m.project(1.0, 1.0);
+        // The game's help box (bottom left): markers drawn over it would hide its text, and, when the overlay is visible to
+        // captures, would spoil the check that the map is still open (the overlay would flicker at high zoom).
+        let help = detect::panel_rect(gh as f64);
         let visible: Vec<(usize, f32, f32)> = if m.uncertain {
             vec![]
         } else {
@@ -2231,7 +2234,8 @@ impl App {
                     // Eye of the QUESTS header: my quests and the allies' are hidden, layers / crafting / searches stay.
                     let quest_marker = p.layer.is_none() && (p.ally.is_some() || m.legend.get(p.quest).map(|l| l.kind == model::OwnerKind::Quest).unwrap_or(false));
                     let hidden = self.cfg.quest_markers_hidden && quest_marker;
-                    (inside && !under_panel && !hidden).then_some((i, x as f32, y as f32))
+                    let under_help = x > help.0 - 12.0 && x < help.2 + 12.0 && y > help.1 - 12.0 && y < help.3 + 12.0;
+                    (inside && !under_panel && !under_help && !hidden).then_some((i, x as f32, y as f32))
                 })
                 .collect()
         };

@@ -88,6 +88,8 @@ pub struct Strings {
     pub p_find: &'static str,
     /// Markers of an owner on this map ("{n}").
     pub p_spots: &'static str,
+    /// Same, for exactly one marker.
+    pub p_spot: &'static str,
     /// Start of the one-line list of tracked quests with nothing on this map.
     pub p_other_map: &'static str,
     /// Sub-header of the untracked quests of the Quests layer.
@@ -389,6 +391,22 @@ pub struct Strings {
 }
 
 /// French UI texts.
+/// Fills "{n}" with the count and "{s}" with the plural mark ("" for one).
+pub fn count(tmpl: &str, n: usize) -> String {
+    tmpl.replace("{n}", &n.to_string()).replace("{s}", if n == 1 { "" } else { "s" })
+}
+
+impl Strings {
+    /// "{n} spots", singular for one.
+    pub fn spots(&self, n: usize) -> String {
+        if n == 1 {
+            self.p_spot.to_string()
+        } else {
+            self.p_spots.replace("{n}", &n.to_string())
+        }
+    }
+}
+
 pub static FR: Strings = Strings {
     settings_title: "Hunger Overlay — Paramètres",
     key_label: "Clé d'API (à générer sur hunger-companion.com → Compte → Sécurité) :",
@@ -471,6 +489,7 @@ pub static FR: Strings = Strings {
     updated_to: "Hunger Overlay a été mis à jour en version",
     p_find: "Chercher un objet ou une quête…",
     p_spots: "{n} points",
+    p_spot: "1 point",
     p_other_map: "Autre carte :",
     p_avail: "DISPONIBLES SUR CETTE CARTE",
     p_avail_hint: "calque Quêtes",
@@ -549,9 +568,9 @@ pub static FR: Strings = Strings {
     j_click_step: "cliquez une étape : « J'en suis là »",
     j_n_done: "{n} / {t} faites",
     j_step: "{giver} · étape {n} sur {t}",
-    j_cascade_done: "« J'en suis là » marque aussi {n} quêtes précédentes comme faites :",
-    j_cascade_up: "Marque aussi {n} quêtes précédentes comme faites :",
-    j_cascade_reopen: "Rouvre aussi {n} quêtes suivantes :",
+    j_cascade_done: "« J'en suis là » marque aussi {n} quête{s} précédente{s} comme faite{s} :",
+    j_cascade_up: "Marque aussi {n} quête{s} précédente{s} comme faite{s} :",
+    j_cascade_reopen: "Rouvre aussi {n} quête{s} suivante{s} :",
     j_cascade_untrack: "et arrête de suivre :",
     j_undo_note: "Annulable à tout moment",
     j_after: "après {quest}",
@@ -705,6 +724,7 @@ pub static EN: Strings = Strings {
     updated_to: "Hunger Overlay has been updated to version",
     p_find: "Find an item or quest…",
     p_spots: "{n} spots",
+    p_spot: "1 spot",
     p_other_map: "Other map:",
     p_avail: "AVAILABLE ON THIS MAP",
     p_avail_hint: "Quests layer",
@@ -783,9 +803,9 @@ pub static EN: Strings = Strings {
     j_click_step: "click a step: \"I am here\"",
     j_n_done: "{n} / {t} done",
     j_step: "{giver} · step {n} of {t}",
-    j_cascade_done: "\"I am here\" also marks {n} earlier quests done:",
-    j_cascade_up: "Also marks {n} earlier quests done:",
-    j_cascade_reopen: "Also reopens {n} later quests:",
+    j_cascade_done: "\"I am here\" also marks {n} earlier quest{s} done:",
+    j_cascade_up: "Also marks {n} earlier quest{s} done:",
+    j_cascade_reopen: "Also reopens {n} later quest{s}:",
     j_cascade_untrack: "and stops tracking:",
     j_undo_note: "Undo stays available",
     j_after: "after {quest}",

@@ -492,7 +492,7 @@ fn owner(c: &mut Ctx, v: &View, y: f32, q: &LegendQuest) -> f32 {
     let count_t = if q.hidden {
         String::new()
     } else {
-        let mut t = s.p_spots.replace("{n}", &q.on_this_map.to_string());
+        let mut t = s.spots(q.on_this_map as usize);
         if hide_done && done_n > 0 {
             t = format!("+{done_n} {} · {t}", s.k_done.to_lowercase());
         }
@@ -609,7 +609,7 @@ fn ally_rows(c: &mut Ctx, v: &View, y: f32, a: &AllyRow) -> f32 {
     let mut y = y;
     let h = 30.0 * sc;
     let alpha = if a.hidden { 0.4 } else { 1.0 };
-    let count = s.p_spots.replace("{n}", &a.spots.to_string());
+    let count = s.spots(a.spots as usize);
     let (cw, _) = c.r.measure(&count, Font::Small, 200.0 * sc);
     if c.draw {
         if c.hov() {
@@ -656,7 +656,7 @@ fn ally_rows(c: &mut Ctx, v: &View, y: f32, a: &AllyRow) -> f32 {
             right = bx - 6.0 * sc;
         }
         let qa = if *q_hidden { 0.4 } else { 1.0 };
-        let cnt = s.p_spots.replace("{n}", &spots.to_string());
+        let cnt = s.spots(*spots as usize);
         let (cw, _) = c.r.measure(&cnt, Font::Small, 200.0 * sc);
         if c.draw {
             if c.hov() {

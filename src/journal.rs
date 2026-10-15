@@ -1026,7 +1026,7 @@ impl Journal {
         }
         if let Some(n) = self.d.spots.get(qid).filter(|n| **n > 0) {
             if !show {
-                let t = s.p_spots.replace("{n}", &n.to_string());
+                let t = s.spots(*n as usize);
                 let (cw, _) = p.r.measure(&t, Font::Small, 200.0 * k);
                 p.mid(&t, Font::Small, w - pad - cw, y, rh, cw + 2.0, T500);
             }
@@ -1048,15 +1048,15 @@ impl Journal {
         let (sentence, buttons): (String, Vec<(Option<&str>, String, u8, Hit)>) = if st == State::Done {
             let plan = g.plan_reopen(prog, qid);
             let others: Vec<String> = plan.iter().skip(1).map(|c| c.0.clone()).collect();
-            let sent = if others.is_empty() { String::new() } else { format!("{} {}", s.j_cascade_reopen.replace("{n}", &others.len().to_string()), self.names(&others)) };
+            let sent = if others.is_empty() { String::new() } else { format!("{} {}", crate::i18n::count(s.j_cascade_reopen, others.len()), self.names(&others)) };
             (sent, vec![(None, s.a_reopen.into(), 2, Hit::Do(s.toast_reopened.replace("{quest}", &title), plan))])
         } else {
             let here = g.plan_here(prog, qid);
             let up: Vec<String> = here.iter().filter(|c| c.1 == Write::Done).map(|c| c.0.clone()).collect();
             let reset: Vec<String> = here.iter().filter(|c| c.1 == Write::None).map(|c| c.0.clone()).collect();
-            let mut sent = if up.is_empty() { String::new() } else { format!("{} {}", s.j_cascade_done.replace("{n}", &up.len().to_string()), self.names(&up)) };
+            let mut sent = if up.is_empty() { String::new() } else { format!("{} {}", crate::i18n::count(s.j_cascade_done, up.len()), self.names(&up)) };
             if !reset.is_empty() {
-                sent += &format!("  {} {}", s.j_cascade_reopen.replace("{n}", &reset.len().to_string()), self.names(&reset));
+                sent += &format!("  {} {}", crate::i18n::count(s.j_cascade_reopen, reset.len()), self.names(&reset));
             }
             let mut b = vec![(None, format!("+ {}", s.a_track_here), 2, Hit::Do(format!("{} {title}", s.toast_tracking), here))];
             if !g.is_repeatable(qid) {
