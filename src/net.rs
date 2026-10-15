@@ -83,6 +83,8 @@ pub struct Shared {
     pub search_items: std::collections::HashMap<String, ItemFile>,
     /// Message to show the user after a refused write ("unsupported" | "readonly" | "failed" | "conflict").
     pub notice: Option<&'static str>,
+    /// Version already installed, waiting for the next start (not downloaded again).
+    pub installed: Option<String>,
     /// Hub list of possible raid allies (None = not fetched yet; Some(Err) = failed).
     pub hub: Option<Result<Vec<crate::model::HubEntry>, &'static str>>,
     /// Current connection state (None = nothing attempted yet).
@@ -781,7 +783,7 @@ impl Worker {
         let Ok(resp) = self.agent.get(&url).call() else { return };
         let Some(v) = resp.into_string().ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()) else { return };
         let latest = v["latest"].as_str().unwrap_or("").to_string();
-        if !version_gt(&latest, env!("CARGO_PKG_VERSION")) {
+        if !version_gt(&latest, env!("CARGO_PKG_VERSION")) || self.shared.lock().unwrap().installed.as_deref() == Some(latest.as_str()) {
             return;
         }
         let page = v["notes_url"].as_str().unwrap_or("https://hunger-companion.com/overlay").to_string();

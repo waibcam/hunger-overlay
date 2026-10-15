@@ -381,6 +381,8 @@ pub struct Strings {
     pub al_no_account: &'static str,
     /// Quest markers hidden on the map (eye of the QUESTS header).
     pub p_markers_hidden: &'static str,
+    /// An update is in place, used at the next start ("{v}").
+    pub update_installed: &'static str,
     pub toast_needs_site: &'static str,
     /// Toast: the progression changed on the website meanwhile (409).
     pub toast_conflict: &'static str,
@@ -615,6 +617,7 @@ pub static FR: Strings = Strings {
     t_avail_you: "Disponible pour vous aussi",
     al_no_account: "sans compte",
     p_markers_hidden: "Repères masqués sur la carte",
+    update_installed: "La version {v} est installée : elle sera utilisée au prochain lancement de Hunger Overlay.",
     toast_needs_site: "Le site ne gère pas encore cette action (mise à jour en cours).",
     toast_conflict: "Votre progression a changé sur le site entre-temps : vérifiez et recommencez.",
 };
@@ -848,6 +851,7 @@ pub static EN: Strings = Strings {
     t_avail_you: "Available for you too",
     al_no_account: "no account",
     p_markers_hidden: "Markers hidden on the map",
+    update_installed: "Version {v} is installed: it will be used the next time Hunger Overlay starts.",
     toast_needs_site: "The website does not support this action yet (update in progress).",
     toast_conflict: "Your progression changed on the website meanwhile: check and try again.",
 };

@@ -72,6 +72,8 @@ pub struct Config {
     pub hidden_ally_quests: Vec<String>,
     /// Every quest marker (mine and the allies') hidden on the map, to see only the layers.
     pub quest_markers_hidden: bool,
+    /// Version that ran last (to say "updated to X" once after an update).
+    pub last_version: String,
 }
 
 impl Default for Config {
@@ -104,6 +106,7 @@ impl Default for Config {
             hidden_allies: vec![],
             hidden_ally_quests: vec![],
             quest_markers_hidden: false,
+            last_version: String::new(),
         }
     }
 }

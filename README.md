@@ -50,8 +50,8 @@ extractions and more appear exactly where they are, and they follow the map as y
 - **Ten languages** for the game data. The interface is in English or French. "Auto" follows the Windows language
   (English when it is not offered), or you can pick one from a list.
 - **Settings window** with a light or dark theme that follows Windows.
-- **Automatic updates.** The new version is downloaded, its SHA-256 checked, and it is installed only when the map is
-  not shown.
+- **Automatic updates.** The new version is downloaded, its SHA-256 checked, and put in place when the map is not
+  shown; it is used the next time the app starts (the app never relaunches itself).
 
 | Default view | Panel |
 |---|---|

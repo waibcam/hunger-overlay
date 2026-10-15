@@ -1,6 +1,10 @@
 //! Automatic update: downloads the new version announced by `app.json` (a direct link to the exe of the GitHub
-//! release), verifies its SHA-256 fingerprint, replaces the running exe and restarts.
-//! Nothing is replaced if the fingerprint does not match.
+//! release), verifies its SHA-256 fingerprint and puts it in place of the exe; the new version runs the next time the
+//! app starts. Nothing is replaced if the fingerprint does not match.
+//!
+//! The app never starts a process itself: replacing its own exe AND relaunching it is what antivirus heuristics take
+//! for a "dropper" (Kaspersky flagged the build that did both, 2026-10-15), so the new version simply waits for the
+//! next start (with "Start with Windows", the next Windows session).
 //!
 //! What goes over the network here: one plain HTTPS GET to the exe URL taken from `app.json` (which itself is
 //! fetched from hunger-companion.com, see `net.rs`). No API key, no user data and no custom headers are sent
@@ -55,9 +59,9 @@ pub fn download(agent: &ureq::Agent, url: &str, sha256: &str, version: &str) -> 
     Ok(path)
 }
 
-/// Replaces the running exe with `new_exe` (already verified by `download`) and launches the new version.
-/// The caller must exit afterwards. The previous exe is kept as `.exe.old` and deleted at the next start.
-pub fn install_and_restart(new_exe: &Path) -> Result<(), String> {
+/// Puts `new_exe` (already verified by `download`) in place of the running exe; the running version keeps working
+/// and the new one is used at the next start. The previous exe is kept as `.exe.old` and deleted at the next start.
+pub fn install(new_exe: &Path) -> Result<(), String> {
     let cur = std::env::current_exe().map_err(|e| e.to_string())?;
     let old = cur.with_extension("exe.old");
     let _ = std::fs::remove_file(&old);
@@ -67,9 +71,6 @@ pub fn install_and_restart(new_exe: &Path) -> Result<(), String> {
         let _ = std::fs::rename(&old, &cur); // roll back
         return Err(format!("copying the new version: {e}"));
     }
-    // Free the single-instance lock so the new process can start, then launch it with `--updated`.
-    crate::release_single_instance();
-    std::process::Command::new(&cur).arg("--updated").spawn().map_err(|e| format!("restart: {e}"))?;
     Ok(())
 }
 

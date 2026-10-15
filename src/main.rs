@@ -2539,12 +2539,14 @@ impl App {
         let ready = self.shared.lock().unwrap().update_ready.take();
         let Some((version, path)) = ready else { return };
         logf!("installing version {version}");
-        tray::remove(self.main);
-        match update::install_and_restart(&path) {
-            Ok(()) => std::process::exit(0),
+        // Put in place for the next start; this version keeps running (no relaunch: see update.rs).
+        match update::install(&path) {
+            Ok(()) => {
+                self.shared.lock().unwrap().installed = Some(version.clone());
+                tray::balloon(self.main, "Hunger Overlay", &self.s.update_installed.replace("{v}", &version));
+            }
             Err(e) => {
                 logf!("update failed: {e}");
-                tray::add(self.main, WM_TRAY, "Hunger Overlay");
                 tray::balloon(self.main, "Hunger Overlay", self.s.update_available);
             }
         }
@@ -3284,17 +3286,6 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 /// Handle of the "single instance" mutex (0 = none).
 static SINGLE_INSTANCE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Releases the "single instance" lock (before launching the updated version).
-pub fn release_single_instance() {
-    let h = SINGLE_INSTANCE.swap(0, std::sync::atomic::Ordering::SeqCst);
-    if h != 0 {
-        unsafe {
-            let _ = windows::Win32::System::Threading::ReleaseMutex(windows::Win32::Foundation::HANDLE(h as _));
-            let _ = CloseHandle(windows::Win32::Foundation::HANDLE(h as _));
-        }
-    }
-}
-
 /// Entry point: single-instance check, creation of the three windows (hidden main window, click-through
 /// overlay, clickable panel), passive Raw Input registration, network and resync threads, tray icon,
 /// then the Windows message loop.
@@ -3303,9 +3294,7 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Texts in the language chosen in the settings (Auto = Windows').
         let s = i18n::t_for(&Config::load().locale);
-        let updated = std::env::args().any(|a| a == "--updated");
-        // After an update, the old instance may take a moment to close: wait a little.
-        let mut tries = if updated { 50 } else { 1 };
+        let mut tries = 1;
         loop {
             let m = CreateMutexW(None, true, w!("Local\\HungerOverlay.SingleInstance"));
             let exists = GetLastError() == ERROR_ALREADY_EXISTS;
@@ -3325,7 +3314,7 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         log::init();
-        logf!("starting v{}{}", env!("CARGO_PKG_VERSION"), if updated { " (after update)" } else { "" });
+        logf!("starting v{}", env!("CARGO_PKG_VERSION"));
         update::cleanup();
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
 
@@ -3400,6 +3389,12 @@ fn main() {
             }),
         );
         let mut cfg = Config::load();
+        // First start of a new version (put in place by the automatic update): say so once.
+        let updated = !cfg.last_version.is_empty() && cfg.last_version != env!("CARGO_PKG_VERSION");
+        if cfg.last_version != env!("CARGO_PKG_VERSION") {
+            cfg.last_version = env!("CARGO_PKG_VERSION").into();
+            cfg.save();
+        }
         // "Start with Windows": the Run registry entry is the reference. If it exists, it is rewritten to point to
         // this exe (in case the exe was moved), so it never launches an old copy.
         cfg.autostart = config::autostart_enabled();
