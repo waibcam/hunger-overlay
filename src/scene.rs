@@ -271,6 +271,7 @@ mod tests {
             placed: false,
             quest_ref: None,
             extra: vec![],
+            height: None,
         }
     }
 

@@ -924,6 +924,9 @@ impl App {
             self.shown = visible;
             unsafe {
                 let _ = ShowWindow(self.overlay, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                if visible {
+                    self.raise_dialogs();
+                }
             }
             if !visible {
                 self.show_panel(false);
@@ -1542,6 +1545,17 @@ impl App {
     // ---------- Drawing ----------
     // Everything is drawn into our own windows (overlay + panel); nothing is drawn into the game.
 
+    /// Puts the settings and search windows back above the overlay and the panel (all are "topmost"; the last one
+    /// shown would otherwise cover them).
+    fn raise_dialogs(&self) {
+        let dialogs = [self.settings.as_ref().map(|s| s.hwnd), self.search.as_ref().map(|s| s.hwnd)];
+        for h in dialogs.into_iter().flatten() {
+            unsafe {
+                let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+
     /// Shows or hides the clickable panel window (without taking focus from the game).
     fn show_panel(&mut self, on: bool) {
         if on != self.panel_shown {
@@ -1553,6 +1567,9 @@ impl App {
             }
             unsafe {
                 let _ = ShowWindow(self.panel, if on { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                if on {
+                    self.raise_dialogs();
+                }
             }
         }
     }
@@ -2045,6 +2062,8 @@ struct TipSection {
     chance: Option<f64>,
     /// Footer: (keycap, hint), e.g. ("Ctrl", "+ click to track this quest"); empty keycap = plain hint.
     footer: Option<(String, String)>,
+    /// Height line ("Height", "+5.5 m · upstairs"), added after the other lines.
+    footer_height: Option<(String, String)>,
 }
 
 /// Formats a chance (0..1) as a percentage ("48 %", "2.5 %", "0.25 %").
@@ -2070,7 +2089,7 @@ fn container_of(p: &DrawPoint) -> Option<String> {
 /// Builds the tooltip section of one drawn marker.
 fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
     let p = &m.points[it.members[0]];
-    let mut t = TipSection { color: it.color, eyebrow: String::new(), title: String::new(), lines: vec![], chance: None, footer: None };
+    let mut t = TipSection { color: it.color, eyebrow: String::new(), title: String::new(), lines: vec![], chance: None, footer: None, footer_height: None };
     let owner = match it.owner {
         scene::Owner::Legend(q) => m.legend.get(q).map(|lq| format!("{} · {}", lq.badge, lq.title.to_uppercase()).trim_start_matches(" · ").to_string()),
         scene::Owner::Layer(_) => None,
@@ -2133,6 +2152,22 @@ fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
         return t;
     }
 
+    // Height above the ground (single markers), e.g. "Height  +5.5 m · upstairs".
+    if let Some(h) = p.height {
+        let what = if h < -8.0 {
+            s.h_deep
+        } else if h < -2.0 {
+            s.h_below
+        } else if h <= 2.0 {
+            s.h_ground
+        } else if h <= 8.0 {
+            s.h_upper
+        } else {
+            s.h_high
+        };
+        let v = if h.abs() < 0.5 { what.to_string() } else { format!("{h:+.1} m · {what}") };
+        t.footer_height = Some((s.t_height.to_string(), v));
+    }
     match (it.owner, it.kind) {
         // Untracked quest (Quests layer).
         (_, markers::Kind::QuestAvail) => {
@@ -2205,6 +2240,9 @@ fn tip_for(s: &i18n::Strings, m: &OpenMap, it: &scene::Item) -> TipSection {
                 }
             }
         }
+    }
+    if let Some(hl) = t.footer_height.take() {
+        t.lines.push(hl);
     }
     t
 }
@@ -2884,6 +2922,8 @@ mod preview {
             cfg.layers_on = layers.iter().map(|s| s.to_string()).collect();
             cfg.layers_known = cfg.layers_on.clone();
             cfg.quests_layer_seen = false;
+            // Interface language of the preview: HUNGER_PREVIEW_LANG (default: Auto).
+            cfg.locale = std::env::var("HUNGER_PREVIEW_LANG").unwrap_or_default();
             let now = Instant::now();
             // Map01 default square measured on the designer's screenshot (2560×1440).
             let sq = Square { x0: 597.11, y0: 37.27, side: 4096.0 * 0.33342 };
@@ -2950,11 +2990,7 @@ mod preview {
             // Hover a Quests-layer token (default view) or a tracked container (zoomed view), and show a toast.
             let target = app.scene.iter().find(|it| if name == "default" { it.kind == markers::Kind::QuestAvail && it.members.len() == 1 } else { markers::is_owner(it.kind) && it.members.len() == 1 });
             app.hover = target.map(|it| it.members[0]);
-            // Default view: language list open.
-            app.lang_open = name == "default";
-            if name == "zoomed" {
-                app.toast = Some((panel::Toast { text: format!("{} Mapping the Front", app.s.toast_tracking), ok: true, undo: true }, now));
-            }
+
             app.draw();
             let (l, t, r, b) = app.legend_rect.unwrap();
             std::fs::write(dir.join(format!("overlay_{name}.bgra")), app.renderer.bgra()).unwrap();

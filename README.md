@@ -6,6 +6,8 @@
 Open the map in game: your tracked quests, the containers and harvest nodes that drop what you need, spawn points,
 extractions and more appear exactly where they are, and they follow the map as you zoom and pan.
 
+![The overlay on the Sarlat Farm map, zoomed in: tracked quests, layers, a container tooltip and the panel](docs/screenshots/zoomed.jpg)
+
 - **One small `.exe`** (about 1.5 MB). Nothing to install, no runtime, no administrator rights.
 - **About 10 MB of RAM** while the map is closed.
 - **It reads the screen only.** It never reads or modifies the game's memory or files, never injects anything into the
@@ -43,6 +45,12 @@ extractions and more appear exactly where they are, and they follow the map as y
 - **Settings window** with a light or dark theme that follows Windows.
 - **Automatic updates.** The new version is downloaded, its SHA-256 checked, and it is installed only when the map is
   not shown.
+
+| Default view | Panel |
+|---|---|
+| ![Whole map with tracked quests, extractions, spawn points and untracked quests](docs/screenshots/overview.jpg) | ![The panel](docs/screenshots/panel.jpg) |
+
+*Screenshots: the overlay's own drawing code, rendered over real screenshots of the game's map.*
 
 ## Getting started
 

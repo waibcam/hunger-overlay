@@ -178,6 +178,18 @@ pub struct Strings {
     pub t_objective: &'static str,
     /// After the "Ctrl" keycap.
     pub t_track_footer: &'static str,
+    /// Tooltip key: height of a spot above the ground.
+    pub t_height: &'static str,
+    /// Spot more than 8 m below the ground.
+    pub h_deep: &'static str,
+    /// Spot 2 to 8 m below the ground.
+    pub h_below: &'static str,
+    /// Spot within 2 m of the ground.
+    pub h_ground: &'static str,
+    /// Spot 2 to 8 m above the ground.
+    pub h_upper: &'static str,
+    /// Spot more than 8 m above the ground.
+    pub h_high: &'static str,
 }
 
 /// French UI texts.
@@ -308,6 +320,12 @@ pub static FR: Strings = Strings {
     t_chance: "Chance",
     t_objective: "Objectif",
     t_track_footer: "+ clic : suivre cette quête",
+    t_height: "Hauteur",
+    h_deep: "profondément sous terre",
+    h_below: "sous terre, cave",
+    h_ground: "au sol",
+    h_upper: "à l'étage",
+    h_high: "en hauteur (tour, toit)",
 };
 
 /// English UI texts (used for every language other than French).
@@ -438,6 +456,12 @@ pub static EN: Strings = Strings {
     t_chance: "Chance",
     t_objective: "Objective",
     t_track_footer: "+ click to track this quest",
+    t_height: "Height",
+    h_deep: "deep underground",
+    h_below: "underground, cellar",
+    h_ground: "ground level",
+    h_upper: "upstairs",
+    h_high: "high up (tower, roof)",
 };
 
 /// Languages offered by the site (code, display name).

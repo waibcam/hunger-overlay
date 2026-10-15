@@ -42,7 +42,7 @@ pub enum Kind {
     QuestAvail,
     /// Named place (POI).
     Place,
-    /// Player spawn: ivory crosshair.
+    /// Player spawn: dark token with an ivory crosshair whose ticks stick out (a target).
     Spawn,
     /// Extraction: blue token with an up arrow.
     Extraction,
@@ -123,7 +123,7 @@ pub fn radius(k: Kind) -> f32 {
         Kind::TrackedPlaced => 12.0,
         Kind::Done => 6.5,
         Kind::QuestAvail | Kind::Place | Kind::Key | Kind::Lock => 8.5,
-        Kind::Spawn => 7.0,
+        Kind::Spawn => 11.0,
         Kind::Extraction => 11.0,
         Kind::Boss => 9.0,
         Kind::Trap => 8.0,
@@ -236,17 +236,20 @@ pub fn draw(r: &Renderer, kind: Kind, color: Rgb, badge: &str, x: f32, y: f32, k
             r.fill_diamond(x, y, 2.2 * k, 0.3 * k, rgba(color, a));
         }
         Kind::Spawn => {
+            // Four ticks sticking out of the ring, drawn over a dark outline, then a dark disc with
+            // an ivory ring and centre: readable on the light parchment and on dark ink alike.
             let ticks = |w: f32, c: Rgba| {
-                r.stroke_circle(x, y, rad, w, c, false);
                 for (dx, dy) in [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)] {
-                    let (a0, a1) = (rad + 1.5 * k, rad + 5.5 * k);
+                    let (a0, a1) = (rad - 1.0 * k, rad + 5.5 * k);
                     r.line_round(x + dx * a0, y + dy * a0, x + dx * a1, y + dy * a1, w, c);
                 }
             };
-            ticks(4.6 * k, halo(0.55));
-            r.fill_circle(x, y, 3.2 * k, halo(0.55));
-            ticks(2.0 * k, rgba(color, a));
-            r.fill_circle(x, y, 2.0 * k, rgba(color, a));
+            ticks(6.2 * k, halo(0.85));
+            r.fill_circle(x, y, rad + 1.8 * k, halo(0.6));
+            r.fill_circle(x, y, rad, rgba(TOKEN_FILL, 0.92 * a));
+            r.stroke_circle(x, y, rad - 1.5 * k, 3.0 * k, rgba(color, a), false);
+            ticks(2.8 * k, rgba(color, a));
+            r.fill_circle(x, y, 3.4 * k, rgba(color, a));
         }
         Kind::Extraction => {
             token(r, x, y, rad, k, color, 2.6, a);

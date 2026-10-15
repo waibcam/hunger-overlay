@@ -89,6 +89,9 @@ pub struct Marker {
     /// Profession level needed for a harvest node.
     #[serde(default)]
     pub required_level: Option<u32>,
+    /// Height of the spot above the ground under it, in metres (negative = underground), if the website provides it.
+    #[serde(default)]
+    pub height_m: Option<f64>,
 }
 
 impl Marker {
@@ -429,6 +432,8 @@ pub struct DrawPoint {
     pub quest_ref: Option<(String, String)>,
     /// Labels of the other objectives of the same owner at exactly this spot (duplicates are merged into one point).
     pub extra: Vec<String>,
+    /// Height above the ground, in metres (negative = underground), if known.
+    pub height: Option<f64>,
 }
 
 /// Harvest details of a point.
@@ -610,6 +615,7 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             placed: mk.source.as_deref() == Some("placed"),
             quest_ref: None,
             extra: vec![],
+            height: mk.height_m,
         }
     };
 

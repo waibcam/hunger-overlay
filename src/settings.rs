@@ -389,7 +389,8 @@ impl Settings {
             let title = wide(s.settings_title);
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             // Created small; resized below once the layout height is known.
-            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, PCWSTR(title.as_ptr()), style, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, None, None, inst, None).ok()?;
+            // Topmost, like the overlay: otherwise the markers drawn over the game would cover it.
+            let hwnd = CreateWindowExW(windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST, class, PCWSTR(title.as_ptr()), style, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, None, None, inst, None).ok()?;
             // Key field: native password-style EDIT control (positioned later by `place_edit`).
             let font =CreateFontW(-((14.0 * k) as i32), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, w!("Segoe UI"));
             let key_w = wide(init.key);
@@ -453,7 +454,7 @@ impl Settings {
             st.layout(false);
             // Window size from the layout.
             let mut rc = RECT { left: 0, top: 0, right: (560.0 * k) as i32, bottom: st.height as i32 };
-            let _ = AdjustWindowRectEx(&mut rc, style, false, WINDOW_EX_STYLE(0));
+            let _ = AdjustWindowRectEx(&mut rc, style, false, windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST);
             let _ = SetWindowPos(hwnd, None, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER);
             st.place_edit();
             let _ = ShowWindow(hwnd, SW_SHOW);
