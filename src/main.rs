@@ -894,6 +894,13 @@ impl App {
             })
             .collect();
         logf!("change on {subject}: {} quest(s)", ops.len());
+        // A finished quest whose follow-ups were tracked automatically: say which ones.
+        let auto: Vec<String> = changes
+            .iter()
+            .filter(|(q, w)| *w == quests::Write::Tracked && changes.iter().any(|(d, dw)| *dw == quests::Write::Done && d != q && before.tracked.contains(d) && self.graph.requires(q).contains(d)))
+            .map(|(q, _)| self.quest_title(q))
+            .collect();
+        let label = if auto.is_empty() { label } else { format!("{label} · {} {}", self.s.toast_next, auto.join(", ")) };
         if subject == progress::ME {
             if !self.send_changes(&changes) {
                 self.toast = Some((panel::Toast { text: self.s.toast_needs_site.into(), ok: false, undo: false, next: None }, Instant::now()));
@@ -1059,7 +1066,7 @@ impl App {
             panel::Action::Done(qid) => {
                 let p = self.progress_of(progress::ME);
                 let plan = self.graph.plan_done(&p, &qid);
-                if plan.len() > 1 {
+                if self.graph.cascades(&plan, &qid) {
                     self.open_journal(Some(qid));
                     return;
                 }

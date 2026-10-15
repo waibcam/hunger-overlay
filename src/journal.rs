@@ -972,7 +972,7 @@ impl Journal {
         let mut acts: Vec<(Option<&str>, String, u8, Hit)> = vec![];
         if editable {
             let done_label = s.toast_done.replace("{quest}", &title);
-            let one_or_strip = |label: String, plan: Vec<Change>| if plan.len() > 1 { Hit::Strip(qid.to_string()) } else { Hit::Do(label, plan) };
+            let one_or_strip = |label: String, plan: Vec<Change>| if g.cascades(&plan, qid) { Hit::Strip(qid.to_string()) } else { Hit::Do(label, plan) };
             match st {
                 State::Done => acts.push((None, s.a_reopen.into(), 0, one_or_strip(s.toast_reopened.replace("{quest}", &title), g.plan_reopen(prog, qid)))),
                 State::Tracked => {
