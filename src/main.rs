@@ -1062,6 +1062,7 @@ impl App {
                 return;
             }
             panel::Action::AvailRow(_) => return,
+            panel::Action::ToggleQuestMarkers => self.cfg.quest_markers_hidden = !self.cfg.quest_markers_hidden,
             // ✓ on a tracked quest: done (it never cascades from the panel; if it would, the journal shows the preview).
             panel::Action::Done(qid) => {
                 let p = self.progress_of(progress::ME);
@@ -1237,21 +1238,6 @@ impl App {
             m.n_b = (m.n_b + d.signum()).clamp(0, ZOOM_MAX_N);
             m.n = if per_event { m.n_b } else { m.n_a };
         }
-        // Ctrl + click on a "Quests" layer marker: start tracking that quest on the account. The click itself is not
-        // blocked (the game receives it as usual); we only read it. A cluster tracks its first quest.
-        let ctrl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) } < 0;
-        if flags & LEFT_DOWN != 0 && ctrl && !m.uncertain {
-            let (lx, ly) = ((pos.0 - gx) as f32, (pos.1 - gy) as f32);
-            let hit = self.items_at(lx, ly).into_iter().find_map(|i| {
-                let MapState::Open(m) = &self.state else { return None };
-                self.scene[i].members.iter().find_map(|&pi| m.points.get(pi).and_then(|p| p.quest_ref.clone()))
-            });
-            if let Some((qid, title)) = hit {
-                self.track_quest(qid, title, true);
-                return;
-            }
-        }
-        let MapState::Open(m) = &mut self.state else { return };
         // Left button pressed on the map (not on the game's help panel): a drag (pan) starts.
         if flags & LEFT_DOWN != 0 {
             let (cx, cy) = pos;
@@ -1819,7 +1805,6 @@ impl App {
                 items: sh.items.as_ref(),
                 searched,
                 harvest_title: self.s.harvest_layer,
-                quests_title: self.s.quests_layer,
                 slots: &self.cfg.quest_slots,
                 allies: vec![],
                 startable: None,
@@ -2157,7 +2142,6 @@ impl App {
                 s: self.s,
                 legend: &m.legend,
                 layers: &m.layers,
-                available: &m.available,
                 status: self.last_status.as_ref(),
                 show_done: self.cfg.show_done,
                 min_chance: self.cfg.min_chance,
@@ -2170,7 +2154,7 @@ impl App {
                 other_open: &self.other_open,
                 lang_open: self.lang_open,
                 locale: &self.cfg.locale,
-                quests_new: !self.cfg.quests_layer_seen,
+                quest_markers_hidden: self.cfg.quest_markers_hidden,
                 recent: self.recent_track.as_ref().map(|t| t.0.as_str()),
                 up_next: &m.up_next,
                 repeat_avail: m.repeat_avail,
@@ -2217,7 +2201,10 @@ impl App {
                     let inside = x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && x > -20.0 && y > -20.0 && x < gw as f64 + 20.0 && y < gh as f64 + 20.0;
                     // Not under the panel (it is translucent: markers would show through it).
                     let under_panel = legend_rect.map(|(l, t, r, b)| x as f32 > l - 4.0 && (x as f32) < r + 4.0 && y as f32 > t - 4.0 && (y as f32) < b + 4.0).unwrap_or(false);
-                    (inside && !under_panel).then_some((i, x as f32, y as f32))
+                    // Eye of the QUESTS header: my quests and the allies' are hidden, layers / crafting / searches stay.
+                    let quest_marker = p.layer.is_none() && (p.ally.is_some() || m.legend.get(p.quest).map(|l| l.kind == model::OwnerKind::Quest).unwrap_or(false));
+                    let hidden = self.cfg.quest_markers_hidden && quest_marker;
+                    (inside && !under_panel && !hidden).then_some((i, x as f32, y as f32))
                 })
                 .collect()
         };

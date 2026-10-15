@@ -32,10 +32,8 @@ extractions and more appear exactly where they are, and they follow the map as y
   - quick settings (completed objectives, minimum chance, language);
   - one click to hide or show a quest, and hovering a quest highlights its markers on the map;
   - optional **layers**, in groups: spawn points, extractions, mini-bosses, traps, sound traps, placed loot, harvest
-    (filtered by your levels), keys, locked doors and chests, places, and **Quests**.
-- **Discover quests on the map.** The Quests layer shows where the quests you do not track yet take place. Track one
-  with its **+ Track** button in the panel, or with **Ctrl + click** on its marker (with an Undo link). This needs a
-  key that is allowed to change your tracking.
+    (filtered by your levels), keys, locked doors and chests, places;
+  - an eye on the QUESTS header hides every quest marker (yours and your allies') to see only the layers.
 - **Quest journal.** Your progression per character, in the real play order, with the quests that depend on others:
   - **Up next** shows the first quest to do for each character; "Already done" marks it done and proposes the next one;
   - click a step to say "**I am here**": the earlier quests become done (shown before anything is saved);

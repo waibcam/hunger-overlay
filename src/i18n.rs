@@ -379,6 +379,8 @@ pub struct Strings {
     /// Toast: the website does not support this change yet.
     /// Hub member without a website account.
     pub al_no_account: &'static str,
+    /// Quest markers hidden on the map (eye of the QUESTS header).
+    pub p_markers_hidden: &'static str,
     pub toast_needs_site: &'static str,
     /// Toast: the progression changed on the website meanwhile (409).
     pub toast_conflict: &'static str,
@@ -485,8 +487,8 @@ pub static FR: Strings = Strings {
     toast_undo: "Annuler",
     toast_undone: "Suivi annulé :",
     p_empty: "Aucune quête suivie pour l'instant.",
-    p_empty_hint: "Suivez des quêtes sur hunger-companion.com, ou activez le calque Quêtes pour les découvrir sur cette carte.",
-    p_empty_btn: "Afficher les quêtes de cette carte",
+    p_empty_hint: "Suivez des quêtes sur hunger-companion.com ou dans le journal de quêtes.",
+    p_empty_btn: "Ouvrir le journal de quêtes",
     p_relocating: "Recalage de la carte… repères masqués",
     p_summary: "{q} quêtes · {a} alliés · {l} calques",
     p_scroll: "Suite plus bas · molette",
@@ -612,6 +614,7 @@ pub static FR: Strings = Strings {
     t_local_ally: "allié local",
     t_avail_you: "Disponible pour vous aussi",
     al_no_account: "sans compte",
+    p_markers_hidden: "Repères masqués sur la carte",
     toast_needs_site: "Le site ne gère pas encore cette action (mise à jour en cours).",
     toast_conflict: "Votre progression a changé sur le site entre-temps : vérifiez et recommencez.",
 };
@@ -717,8 +720,8 @@ pub static EN: Strings = Strings {
     toast_undo: "Undo",
     toast_undone: "No longer tracking",
     p_empty: "No quest tracked yet.",
-    p_empty_hint: "Track quests on hunger-companion.com, or turn on the Quests layer to discover them on this map.",
-    p_empty_btn: "Show quests on this map",
+    p_empty_hint: "Track quests on hunger-companion.com or in the quest journal.",
+    p_empty_btn: "Open the quest journal",
     p_relocating: "Re-locating the map… markers hidden",
     p_summary: "{q} quests · {a} allies · {l} layers",
     p_scroll: "More below · scroll",
@@ -844,6 +847,7 @@ pub static EN: Strings = Strings {
     t_local_ally: "local ally",
     t_avail_you: "Available for you too",
     al_no_account: "no account",
+    p_markers_hidden: "Markers hidden on the map",
     toast_needs_site: "The website does not support this action yet (update in progress).",
     toast_conflict: "Your progression changed on the website meanwhile: check and try again.",
 };

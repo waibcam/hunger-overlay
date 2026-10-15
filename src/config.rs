@@ -70,6 +70,8 @@ pub struct Config {
     pub hidden_allies: Vec<String>,
     /// Ally quests hidden on the map ("<ally key>|<quest id>").
     pub hidden_ally_quests: Vec<String>,
+    /// Every quest marker (mine and the allies') hidden on the map, to see only the layers.
+    pub quest_markers_hidden: bool,
 }
 
 impl Default for Config {
@@ -101,6 +103,7 @@ impl Default for Config {
             ally_order: vec![],
             hidden_allies: vec![],
             hidden_ally_quests: vec![],
+            quest_markers_hidden: false,
         }
     }
 }

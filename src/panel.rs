@@ -8,7 +8,7 @@
 
 use crate::i18n::Strings;
 use crate::markers;
-use crate::model::{AllyRow, AvailQuest, LegendLayer, LegendQuest, OwnerKind};
+use crate::model::{AllyRow, LegendLayer, LegendQuest, OwnerKind};
 use crate::net::Status;
 use crate::render::{Font, Renderer, Rgba};
 
@@ -69,6 +69,8 @@ pub enum Action {
     ToggleAllyQuest(String, String),
     /// Remove a quest from a local ally (ally key, quest id).
     RemoveAllyQuest(String, String),
+    /// Hide / show every quest marker on the map (mine and the allies').
+    ToggleQuestMarkers,
 }
 
 /// Clickable zone (coordinates local to the panel).
@@ -148,8 +150,6 @@ pub struct View<'a> {
     pub legend: &'a [LegendQuest],
     /// Map layers.
     pub layers: &'a [LegendLayer],
-    /// Untracked quests with objectives on this map.
-    pub available: &'a [AvailQuest],
     /// Connection / key status, if known.
     pub status: Option<&'a Status>,
     /// Whether objectives already done are listed.
@@ -174,8 +174,8 @@ pub struct View<'a> {
     pub lang_open: bool,
     /// Language setting ("" = Auto), to tick the current entry of the list.
     pub locale: &'a str,
-    /// Show the "NEW" tag on the Quests layer pill.
-    pub quests_new: bool,
+    /// Every quest marker is hidden on the map (eye of the QUESTS header).
+    pub quest_markers_hidden: bool,
     /// Quest tracked a few seconds ago (gets a "NEW" tag).
     pub recent: Option<&'a str>,
     /// The map position is being recomputed (markers hidden).
@@ -237,6 +237,7 @@ pub(crate) const IC_CHECK: &str = "\u{E73E}";
 pub(crate) const IC_HIDDEN: &str = "\u{ED1A}";
 pub(crate) const IC_INFO: &str = "\u{E946}";
 pub(crate) const IC_BOOK: &str = "\u{E82D}";
+pub(crate) const IC_EYE: &str = "\u{E7B3}";
 pub(crate) const IC_ADD_FRIEND: &str = "\u{E8FA}";
 pub(crate) const IC_CLOUD: &str = "\u{E753}";
 pub(crate) const IC_PC: &str = "\u{E7F8}";
@@ -375,11 +376,31 @@ fn callout(c: &mut Ctx, x: f32, y: f32, icon: &str, title: &str, body: Option<&s
 /// Section header (chevron, serif caps title, count pill, optional right-hand text or link); returns the new y.
 #[allow(clippy::too_many_arguments)]
 fn section(c: &mut Ctx, y: f32, id: &str, title: &str, count: Option<usize>, right: Option<(String, Option<Action>)>, collapsed: bool) -> f32 {
+    section_eye(c, y, id, title, count, right, collapsed, None)
+}
+
+/// Section header with an optional eye button at the right end: (markers hidden, action).
+#[allow(clippy::too_many_arguments)]
+fn section_eye(c: &mut Ctx, y: f32, id: &str, title: &str, count: Option<usize>, right: Option<(String, Option<Action>)>, collapsed: bool, eye: Option<(bool, Action)>) -> f32 {
     let sc = c.sc;
     let h = 30.0 * sc;
     let y = y + 6.0 * sc;
-    // Right-hand link first (it takes precedence over the header zone when clicked).
+    // Buttons and the right-hand link first (they take precedence over the header zone when clicked).
     let mut right_x = c.w - c.pad;
+    if let Some((hidden, a)) = eye {
+        let bs = 24.0 * sc;
+        let bx = right_x - bs;
+        let by = y + (h - bs) / 2.0;
+        if c.draw {
+            let hov = c.hov();
+            if hov || hidden {
+                c.r.fill_rrect(bx, by, bx + bs, by + bs, 5.0 * sc, if hidden { fade(GOLD, 0.22) } else { INK700 });
+            }
+            c.r.text_center(if hidden { IC_HIDDEN } else { IC_EYE }, Font::Icon, bx + bs / 2.0, by + bs / 2.0, if hidden || hov { GOLD_HI } else { T300 });
+        }
+        c.push(bx, by, bx + bs, by + bs, a);
+        right_x = bx - 8.0 * sc;
+    }
     if let Some((t, a)) = &right {
         let (tw, _) = c.r.measure(t, Font::Small, 300.0 * sc);
         right_x -= tw;
@@ -889,9 +910,16 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
 
     // 6. QUESTS.
     let quests: Vec<&LegendQuest> = v.legend.iter().filter(|q| q.kind == OwnerKind::Quest).collect();
-    let quests_on = v.layers.iter().any(|l| l.id == "quests" && l.on);
     let open_q = !collapsed("quests");
-    y = section(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), None, !open_q);
+    y = section_eye(&mut c, y, "quests", s.p_sec_quests, (!quests.is_empty()).then_some(quests.len()), None, !open_q, Some((v.quest_markers_hidden, Action::ToggleQuestMarkers)));
+    if v.quest_markers_hidden {
+        let rh = 22.0 * sc;
+        if draw {
+            r.text_center(IC_HIDDEN, Font::Icon, pad + 6.0 * sc, y + rh / 2.0, T500);
+            c.text_mid(s.p_markers_hidden, Font::Small, pad + 20.0 * sc, y, rh, iw - 20.0 * sc, T500);
+        }
+        y += rh;
+    }
     if open_q {
         // Quests with markers here (or hidden, or filtered out) are listed; the others share one line.
         let other = |q: &LegendQuest| !q.hidden && q.on_this_map == 0 && q.filtered == 0 && !v.other_open.contains(&q.quest_id);
@@ -940,10 +968,8 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 r.text(s.p_empty_hint, Font::Small, pad, y, iw, T500);
             }
             y += h2 + 8.0 * sc;
-            if !quests_on {
-                chip(&mut c, pad, y, 30.0 * sc, None, s.p_empty_btn, Some(Action::ToggleLayer("quests".into())), Chip::Primary);
-                y += 30.0 * sc + 6.0 * sc;
-            }
+            chip(&mut c, pad, y, 30.0 * sc, Some(IC_BOOK), s.p_empty_btn, Some(Action::Journal), Chip::Primary);
+            y += 30.0 * sc + 6.0 * sc;
         }
         // "Up next": quests the player can start now (the website's prerequisites). Without them, the untracked
         // quests on this map (Quests layer ON), as before.
@@ -952,8 +978,6 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                 .iter()
                 .map(|u| (u.quest_id.clone(), u.title.clone(), match u.step { Some((n, t)) => format!("{} · {n}/{t}", u.giver), None => u.giver.clone() }, u.here))
                 .collect()
-        } else if quests_on {
-            v.available.iter().map(|a| (a.quest_id.clone(), a.title.clone(), a.giver.clone(), true)).collect()
         } else {
             vec![]
         };
@@ -1113,7 +1137,7 @@ pub fn layout(r: &Renderer, v: &View, w: f32, max_h: f32, sc: f32, hover: Option
                         markers::draw(r, kind, col, "", px + 15.0 * sc, y + ph / 2.0, 0.8 * sc, sc, if ly.on { 1.0 } else { 0.42 });
                         let count = ly.here.to_string();
                         let (nw, _) = r.measure(&count, Font::Caps, 100.0);
-                        let new_tag = ly.id == "quests" && v.quests_new;
+                        let new_tag = false;
                         let tag_w = if new_tag { r.measure(s.p_new, Font::Caps, 200.0).0 + 10.0 * sc } else { 0.0 };
                         let name_x = px + 30.0 * sc;
                         let name_max = pw - 30.0 * sc - nw - 14.0 * sc - tag_w;

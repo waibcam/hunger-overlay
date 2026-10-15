@@ -622,8 +622,6 @@ pub struct ViewOpts<'a> {
     pub searched: Vec<(String, String, Option<&'a [Marker]>)>,
     /// Title of the merged "Harvest" layer (translated).
     pub harvest_title: &'a str,
-    /// Translated title of the "Quests" layer (objective locations of every quest the player does not track).
-    pub quests_title: &'a str,
     /// Badge slots of the tracked quests (`Config::quest_slots`): order and numbers of the quest rows.
     pub slots: &'a [String],
     /// Raid allies (at most 2), with their tracked quests.
@@ -924,14 +922,9 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
             out.layers.push(LegendLayer { id: ly.id.clone(), title: ly.title.clone(), color, diamond: ly.shape == "diamond", on, here });
         }
     }
-    // 5. "Quests" layer: the precise objective locations of every quest the player does NOT track yet, so quests
-    //    can be discovered on the map (and tracked with Ctrl+click). Loot-source points are not included (too many).
-    let quests_on = o.layers_on.iter().any(|l| l == "quests");
+    // 5. Untracked quests with objective spots on this map (shown in "Up next" with a "!" when they are here; they
+    //    are not drawn on the map: the quest journal is there to discover quests).
     let tracked: std::collections::HashSet<&str> = tracker.tracked.iter().map(|t| t.quest_id.as_str()).collect();
-    let li = out.layers.iter().position(|l| l.id == "places").map(|p| p + 1).unwrap_or(out.layers.len());
-    let qcolor = (0.96, 0.84, 0.45);
-    let mut here = 0;
-    let mut qpoints = vec![];
     for (qid, pq) in &pack.quests {
         if tracked.contains(qid.as_str()) || o.startable.map(|s| !s.contains(qid)).unwrap_or(false) {
             continue;
@@ -939,14 +932,8 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         let mut spots = 0;
         for po in &pq.objectives {
             for mk in po.markers.iter().filter(|m| m.map == map_id && m.source.as_deref() == Some("objective")) {
-                let Some((u, v)) = to_uv(mk) else { continue };
-                here += 1;
-                spots += 1;
-                if quests_on {
-                    let mut p = point(mk, u, v, qcolor, usize::MAX, None, false, false, &po.label);
-                    p.label = po.label.clone();
-                    p.quest_ref = Some((qid.clone(), pq.title.clone()));
-                    qpoints.push(p);
+                if to_uv(mk).is_some() {
+                    spots += 1;
                 }
             }
         }
@@ -955,19 +942,6 @@ pub fn build_view(pack: &Pack, tracker: &Tracker, o: &ViewOpts) -> ViewOut {
         }
     }
     out.available.sort_by(|a, b| a.giver.cmp(&b.giver).then_with(|| a.title.cmp(&b.title)));
-    // Layer indexes after the insertion point move by one.
-    for p in out.points.iter_mut() {
-        if let Some(l) = p.layer.as_mut() {
-            if *l >= li {
-                *l += 1;
-            }
-        }
-    }
-    for p in qpoints.iter_mut() {
-        p.layer = Some(li);
-    }
-    out.points.extend(qpoints);
-    out.layers.insert(li, LegendLayer { id: "quests".into(), title: o.quests_title.into(), color: qcolor, diamond: false, on: quests_on, here });
 
     // 6. Badges: quests 1…9 in tracking order; recipes and searches A…Z.
     let (mut nq, mut nl) = (0u32, 0u32);
@@ -1081,7 +1055,7 @@ mod tests {
         let items: Option<ItemsPack> = std::fs::read_to_string(d.join("items.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
         let all: Vec<String> = pack.layers.iter().map(|l| l.id.clone()).collect();
         for map in ["Map01", "Map02", "Map03"] {
-            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", quests_title: "Quests", slots: &[], allies: vec![], startable: None };
+            let o = ViewOpts { map_id: map, show_done: false, hidden: &[], min_chance: 0.10, layers_on: &all, items: items.as_ref(), searched: vec![], harvest_title: "Harvest", slots: &[], allies: vec![], startable: None };
             let v = build_view(&pack, &tracker, &o);
             let harvest = v.points.iter().filter(|p| p.harvest.is_some()).count();
             let locked = v.points.iter().filter(|p| p.locked).count();
