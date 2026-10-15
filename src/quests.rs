@@ -86,8 +86,6 @@ pub struct Graph {
     givers: Vec<String>,
     /// Repeatable quests (daily, weekly, monthly): never in a cascade, never proposed as "next".
     repeatable: HashSet<String>,
-    /// Daily quests (they appear at random in game: never tracked automatically).
-    daily: HashSet<String>,
 }
 
 impl Graph {
@@ -122,15 +120,13 @@ impl Graph {
 
     /// Builds the graph from the pack (no prerequisites until the website publishes them: contract v1.2).
     pub fn from_pack(p: &crate::model::Pack) -> Graph {
-        let mut g = Graph::new(
+        Graph::new(
             p.quests.iter().map(|(id, q)| {
                 let rep = q.repeatable || q.kind.as_deref().map(|k| k != "story" && k != "standard").unwrap_or(false);
                 (id.clone(), q.giver.clone().unwrap_or_default(), q.line.clone().map(|l| (l, q.line_pos.unwrap_or(0))), q.requires.clone(), rep)
             }),
             &p.givers,
-        );
-        g.daily = p.quests.iter().filter(|(_, q)| q.kind.as_deref() == Some("daily")).map(|(id, _)| id.clone()).collect();
-        g
+        )
     }
 
     /// True when the website publishes prerequisites (otherwise cascades and "Up next" are unavailable).
@@ -244,8 +240,8 @@ impl Graph {
     }
 
     /// Done (or "Done up to here"): `q` and every missing ancestor become done. A repeatable quest is only untracked.
-    /// As on the website, finishing a TRACKED quest also tracks the quests it unlocks (except daily quests, which
-    /// appear at random in game).
+    /// As on the website, finishing a TRACKED quest also tracks the story quests it unlocks. Repeatable quests (daily,
+    /// weekly, monthly) appear at random in game: they are only ever tracked by hand.
     pub fn plan_done(&self, p: &Progress, q: &str) -> Vec<Change> {
         if self.repeatable.contains(q) {
             return self.plan_untrack(p, q);
@@ -263,14 +259,14 @@ impl Graph {
         v
     }
 
-    /// Quests unlocked by `q` (direct dependents whose prerequisites are all done in `after`), not done or tracked
-    /// yet, daily quests excluded.
+    /// Story quests unlocked by `q` (direct dependents whose prerequisites are all done in `after`), not done or
+    /// tracked yet. Repeatable quests are never included.
     pub fn follow_ups(&self, after: &Progress, q: &str) -> Vec<String> {
         self.dependents
             .get(q)
             .into_iter()
             .flatten()
-            .filter(|d| !self.daily.contains(*d) && !after.done.contains(*d) && !after.tracked.contains(*d))
+            .filter(|d| !self.repeatable.contains(*d) && !after.done.contains(*d) && !after.tracked.contains(*d))
             .filter(|d| self.requires(d).iter().all(|r| after.done.contains(r)))
             .cloned()
             .collect()
@@ -466,11 +462,12 @@ mod tests {
         assert!(matches!(s.iter().find(|x| x.0 == "Louis").map(|x| &x.1), Some(Next::Waiting(_, b)) if b == "Quest.Eloise.Q01"), "{s:?}");
         let s2 = g.suggestions(&apply(&empty, &g.plan_done(&empty, "Quest.Eloise.Q01")));
         assert!(matches!(s2.iter().find(|x| x.0 == "Louis").map(|x| &x.1), Some(Next::Available(_))), "{s2:?}");
-        // Finishing a tracked quest tracks the one it unlocks (Eloise Q01 → Q04 and Louis Q01…), never a daily.
+        // Finishing a tracked quest tracks the story quests it unlocks (Eloise Q01 → Q04, Louis Q01…), never a repeatable.
         let on1 = apply(&empty, &g.plan_track(&empty, "Quest.Eloise.Q01"));
         let fin = g.plan_done(&on1, "Quest.Eloise.Q01");
         assert!(fin.iter().any(|(q, w)| q == "Quest.Eloise.Q04" && *w == Write::Tracked), "{fin:?}");
         assert!(!g.cascades(&fin, "Quest.Eloise.Q01"));
+        assert!(fin.iter().all(|(q, _)| !g.is_repeatable(q)), "{fin:?}");
         // Play order is the line order, not the id order (Eloise: Q01, Q04, Q05, Q02…).
         let story = g.story("Eloise");
         assert_eq!(&story[..3], &["Quest.Eloise.Q01", "Quest.Eloise.Q04", "Quest.Eloise.Q05"]);
